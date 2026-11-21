@@ -65,6 +65,10 @@ class DaliWebServer:
         app.router.add_get("/api/device/{addr}", self.api_device_info)
         app.router.add_post("/api/device/{addr}/identify", self.api_device_identify)
         app.router.add_post("/api/device/{addr}/address", self.api_device_address)
+        app.router.add_post("/api/device/{addr}/application_controller", self.api_device_setting)
+        app.router.add_post("/api/device/{addr}/instance/{instance}/enabled", self.api_device_setting)
+        app.router.add_post("/api/device/{addr}/instance/{instance}/scheme", self.api_device_setting)
+        app.router.add_post("/api/device/{addr}/save", self.api_device_setting)
         app.router.add_get("/api/monitor", self.api_monitor)
         # Memory bank tool
         app.router.add_get("/api/memory", self.api_memory_read)
@@ -275,7 +279,36 @@ class DaliWebServer:
         return _json(res)
 
     async def api_device_info(self, request):
-        return _json(await self.cfg.read_device(self._addr(request)))
+        try:
+            return _json(await self.cfg.read_device(self._addr(request)))
+        except ValueError as err:
+            return _json({"error": str(err)}, 400)
+        except Exception as err:
+            return _json({"error": str(err)}, 502)
+
+    async def api_device_setting(self, request):
+        try:
+            addr = self._addr(request)
+            setting = request.path.rsplit("/", 1)[-1]
+            if setting == "save":
+                result = await self.cfg.save_device(addr)
+            else:
+                body = await request.json()
+                if not isinstance(body, dict):
+                    raise ValueError("body must be a JSON object")
+                if setting == "application_controller":
+                    result = await self.cfg.set_application_controller(addr, body.get("enabled"))
+                else:
+                    instance = int(request.match_info["instance"])
+                    if setting == "enabled":
+                        result = await self.cfg.set_instance_enabled(addr, instance, body.get("enabled"))
+                    else:
+                        result = await self.cfg.set_instance_scheme(addr, instance, body.get("scheme"))
+            return _json(result)
+        except (ValueError, TypeError) as err:
+            return _json({"error": str(err)}, 400)
+        except Exception as err:
+            return _json({"error": str(err)}, 502)
 
     async def api_device_identify(self, request):
         return _json(await self.cfg.identify_device(self._addr(request)))

@@ -2,7 +2,7 @@
 import pytest
 
 from app.dali_config import DaliConfig
-from conftest import RawResp, cname, dtr_value, numeric
+from conftest import RawResp, cname, dest_addr, dtr_value, numeric
 
 
 # ------------------------------------------------------------ memory read
@@ -103,11 +103,19 @@ async def test_identify_device(driver):
 
 
 async def test_change_device_address(driver):
+    current = {"address": 62}
+    def responder(cmd):
+        if cname(cmd) == "QueryDeviceStatus" and dest_addr(cmd) == current["address"]:
+            return numeric(0)
+        if cname(cmd) == "SetShortAddress":
+            current["address"] = 5
+    driver._responder = responder
     cfg = DaliConfig(driver)
     await cfg.change_device_address(62, 5)
-    assert cname(driver.sent[0]) == "DTR0"
-    assert dtr_value(driver.sent[0]) == 5
-    assert cname(driver.sent[1]) == "SetShortAddress"
+    writes = [cmd for cmd in driver.sent if not cname(cmd).startswith("Query")]
+    assert cname(writes[0]) == "DTR0"
+    assert dtr_value(writes[0]) == 5
+    assert cname(writes[1]) == "SetShortAddress"
 
 
 async def test_read_pushbutton(driver):

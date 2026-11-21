@@ -1,0 +1,207 @@
+blueprint:
+  name: Jung 1745 DSTE through DALI2MQTT
+  description: >-
+    One automation per knob. Use instances 0 and 2 with Device + instance
+    scheme 2. Supply two distinct boolean helpers and one timer per knob.
+    Short press toggles, rotation dims, pressed rotation adjusts Kelvin.
+    Steps apply per event; no continuous repeat is assumed.
+  domain: automation
+  homeassistant:
+    min_version: 2025.3.0
+  input:
+    mqtt_base_topic:
+      name: MQTT base topic (without trailing slash)
+      default: dali2mqtt
+      selector:
+        text: {}
+    device_address:
+      name: Control device short address
+      selector:
+        number:
+          min: 0
+          max: 63
+          step: 1
+          mode: box
+    target_light:
+      name: Target light
+      selector:
+        entity:
+          domain: light
+    pressed:
+      name: Pressed helper (unique to this knob)
+      selector:
+        entity:
+          domain: input_boolean
+    rotated_while_pressed:
+      name: Rotation suppression helper (unique to this knob)
+      selector:
+        entity:
+          domain: input_boolean
+    recovery_timer:
+      name: Recovery timer (unique to this knob)
+      selector:
+        entity:
+          domain: timer
+    brightness_fast:
+      name: Fast brightness step (%)
+      default: 10
+      selector:
+        number: {min: 1, max: 100, step: 1, mode: box}
+    brightness_slow:
+      name: Slow brightness step (%)
+      default: 5
+      selector:
+        number: {min: 1, max: 100, step: 1, mode: box}
+    brightness_increment:
+      name: Increment brightness step (%)
+      default: 2
+      selector:
+        number: {min: 1, max: 100, step: 1, mode: box}
+    temperature_fast:
+      name: Fast temperature step (K)
+      default: 200
+      selector:
+        number: {min: 1, max: 2000, step: 1, mode: box}
+    temperature_slow:
+      name: Slow temperature step (K)
+      default: 100
+      selector:
+        number: {min: 1, max: 2000, step: 1, mode: box}
+    temperature_increment:
+      name: Increment temperature step (K)
+      default: 50
+      selector:
+        number: {min: 1, max: 2000, step: 1, mode: box}
+
+mode: queued
+max: 100
+max_exceeded: warning
+trigger_variables:
+  base_topic: !input mqtt_base_topic
+triggers:
+  - trigger: mqtt
+    topic: "{{ base_topic ~ '/bus_event' }}"
+    id: bus
+  - trigger: mqtt
+    topic: "{{ base_topic ~ '/status' }}"
+    payload: offline
+    id: reset
+  - trigger: homeassistant
+    event: start
+    id: reset
+  - trigger: event
+    event_type: timer.finished
+    event_data:
+      entity_id: !input recovery_timer
+    id: timeout
+variables:
+  address: !input device_address
+  light: !input target_light
+  pressed_helper: !input pressed
+  rotated_helper: !input rotated_while_pressed
+  timer_helper: !input recovery_timer
+  brightness_fast: !input brightness_fast
+  brightness_slow: !input brightness_slow
+  brightness_increment: !input brightness_increment
+  temperature_fast: !input temperature_fast
+  temperature_slow: !input temperature_slow
+  temperature_increment: !input temperature_increment
+  event: >-
+    {{ trigger.payload_json if trigger.id == 'bus' and
+       trigger.payload_json is defined and trigger.payload_json is mapping else {} }}
+# Filter before queue admission; unrelated knobs cannot fill this queue.
+conditions:
+  - condition: template
+    value_template: >-
+      {{ trigger.id != 'bus' or
+         (event.get('event') is sameas true and
+          event.get('source_address') == address | int and
+          ((event.get('instance_number') == 0 and event.get('event_info') in [0, 1, 2]) or
+           (event.get('instance_number') == 2 and event.get('event_info') in [0, 1, 2, 3, 4, 5, 6]))) }}
+actions:
+  - choose:
+      - conditions: "{{ trigger.id in ['reset', 'timeout'] }}"
+        sequence:
+          # A timer.finished event can wait behind a newer rotation in the queue.
+          - condition: template
+            value_template: "{{ trigger.id == 'reset' or is_state(timer_helper, 'idle') }}"
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - !input pressed
+                - !input rotated_while_pressed
+          - action: timer.cancel
+            target:
+              entity_id: !input recovery_timer
+    default:
+      - variables:
+          instance: "{{ event.get('instance_number') }}"
+          code: "{{ event.get('event_info') }}"
+      - choose:
+          - conditions: "{{ instance == 0 and code == 1 }}"
+            sequence:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: !input rotated_while_pressed
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: !input pressed
+              - action: timer.start
+                target:
+                  entity_id: !input recovery_timer
+                data:
+                  duration: '00:00:30'
+          - conditions: "{{ instance == 0 and code == 0 }}"
+            sequence:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: !input pressed
+          - conditions: "{{ instance == 0 and code == 2 }}"
+            sequence:
+              - condition: template
+                value_template: "{{ is_state(rotated_helper, 'off') }}"
+              - action: light.toggle
+                target:
+                  entity_id: !input target_light
+          - conditions: "{{ instance == 2 }}"
+            sequence:
+              - action: timer.start
+                target:
+                  entity_id: !input recovery_timer
+                data:
+                  duration: '00:00:30'
+              - condition: template
+                value_template: "{{ code != 0 }}"
+              - variables:
+                  direction: "{{ 1 if code in [1, 2, 3] else -1 }}"
+                  speed: "{{ (code - 1) % 3 }}"
+              - choose:
+                  - conditions: "{{ is_state(pressed_helper, 'on') }}"
+                    sequence:
+                      - action: input_boolean.turn_on
+                        target:
+                          entity_id: !input rotated_while_pressed
+                      - condition: template
+                        value_template: >-
+                          {{ 'color_temp' in (state_attr(light, 'supported_color_modes') or []) and
+                             state_attr(light, 'min_color_temp_kelvin') is number and
+                             state_attr(light, 'max_color_temp_kelvin') is number }}
+                      - variables:
+                          lower: "{{ state_attr(light, 'min_color_temp_kelvin') | int }}"
+                          upper: "{{ state_attr(light, 'max_color_temp_kelvin') | int }}"
+                          current: >-
+                            {{ state_attr(light, 'color_temp_kelvin')
+                               if state_attr(light, 'color_temp_kelvin') is number
+                               else (lower + upper) / 2 }}
+                          step: "{{ [temperature_fast, temperature_slow, temperature_increment][speed] | int }}"
+                      - action: light.turn_on
+                        target:
+                          entity_id: !input target_light
+                        data:
+                          color_temp_kelvin: "{{ [lower, [upper, current + direction * step] | min] | max | int }}"
+                default:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input target_light
+                    data:
+                      brightness_step_pct: "{{ direction * ([brightness_fast, brightness_slow, brightness_increment][speed] | int) }}"

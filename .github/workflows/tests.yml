@@ -3,6 +3,16 @@ on:
   push:
   pull_request:
 jobs:
+  jung-blueprint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Jung blueprint with Home Assistant schemas and action engine
+        run: >-
+          docker run --rm --network none
+          --mount "type=bind,source=${{ github.workspace }},target=/repo,readonly"
+          --entrypoint python ghcr.io/home-assistant/home-assistant:2025.3.4
+          /repo/dali2mqtt/tests/validate_jung_blueprint.py
   test:
     runs-on: ubuntu-latest
     steps:

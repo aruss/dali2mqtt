@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.17.0
+
+- Publish DALI-2 input events to MQTT with source address, instance identity,
+  and raw frame information, including unknown events.
+- Add shared Tridonic instance-type decoding with addressed discovery at startup
+  and refresh after device commissioning or address changes.
+- Add Application Controller, instance enable/disable, event scheme, and Save
+  controls to the configuration API and UI, with validation and readback checks.
+- Preserve occupied control-device addresses during commissioning and reject
+  address changes to occupied destinations.
+- Add a Jung 1745 DSTE Home Assistant blueprint for short-press toggle,
+  rotary brightness, and pressed-rotation color temperature with state recovery.
+- Document Jung setup and add Python tests and offline Home Assistant blueprint
+  validation. Physical hardware acceptance and power-cycle persistence remain
+  pending.
+
 ## 1.16.1
 
 - Target amd64 Home Assistant hosts with the Debian Bookworm base and Python 3.11.

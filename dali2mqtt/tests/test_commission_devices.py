@@ -4,7 +4,8 @@ These exercise the randomise/compare/withdraw search that assigns short
 device addresses to Lunatone push-button / input modules so they become
 readable -- the step Cockpit performs before it can show a switch's config.
 """
-from conftest import cname, yes, no
+from conftest import cname, dest_addr, numeric, yes, no
+from dali.device.helpers import DeviceInstanceTypeMapper
 
 from app.dali_config import DaliConfig
 
@@ -41,6 +42,26 @@ class _DeviceBus:
         elif n == "VerifyShortAddress":
             return yes()
         return None
+
+
+async def test_commission_preserves_occupied_addresses_and_refreshes_mapper(driver):
+    bus = _DeviceBus([0x10])
+    programmed = set()
+    def responder(cmd):
+        if cname(cmd) == "QueryDeviceStatus":
+            return numeric(0) if dest_addr(cmd) in {0, 2} | programmed else None
+        if cname(cmd) == "QueryNumberOfInstances":
+            return numeric(1)
+        if cname(cmd) == "QueryInstanceType":
+            return numeric(1)
+        if cname(cmd) == "ProgramShortAddress":
+            programmed.add(cmd.param)
+        return bus(cmd)
+    driver._responder = responder
+    driver.dev_inst_map = DeviceInstanceTypeMapper({(63, 0): 1})
+    result = await DaliConfig(driver).commission_devices()
+    assert result["programmed"] == [1]
+    assert driver.dev_inst_map.mapping == {(0, 0): 1, (1, 0): 1, (2, 0): 1}
 
 
 async def test_commission_devices_programs_each(driver):

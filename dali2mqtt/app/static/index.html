@@ -190,10 +190,13 @@ function selectDevice(a){
       </div>
     </div>
     <div class="card">
-      <h2>Instances</h2>
+      <h2>Application Controller and instances</h2>
+      <div id="devController" class="muted">Read the device to view its controller state.</div>
+      <button onclick="saveDevice(${a})">Save device configuration</button>
+      <div class="muted">Save requests persistent storage. Verify after a power cycle.</div>
       <div id="devInstances" class="muted">Press “Read instances”.</div>
     </div>
-    ${pbCard(a)}
+    <div id="devicePushbutton"></div>
     ${memCard(a,true)}
     <div class="card">
       <h2>Change short address</h2>
@@ -210,9 +213,50 @@ async function identifyDevice(a){ try{ await post(`api/device/${a}/identify`); t
 async function loadDevice(a){
   $("#devInstances").innerHTML='<span class="spin"></span> Reading…';
   try{ const info=await api(`api/device/${a}`);
-    const rows=(info.instances||[]).map(i=>`<div class="row" style="cursor:default"><span class="a">Instance ${i.instance}</span><span class="lvl">type ${i.type??'–'}</span></div>`).join("");
-    $("#devInstances").innerHTML = rows||'<span class="muted">No instances reported.</span>';
-  }catch(e){ $("#devInstances").textContent="Failed: "+e.message; }
+    if(SELDEV!==a) return;
+    const controller=info.application_controller;
+    const canChange=controller.present===true && controller.enabled!==null && !controller.always_active;
+    $("#devController").innerHTML=`<div class="field">Application Controller:
+      ${controller.present===null?'unknown':controller.present?(controller.enabled===null?'unknown':controller.enabled?'enabled':'disabled'):'not present'}
+      ${controller.always_active?' (always active)':''}
+      ${canChange?`<button onclick="setDeviceController(${a},${!controller.enabled})">${controller.enabled?'Disable':'Enable'}</button>`:''}</div>`;
+    const schemes=['Instance','Device','Device + instance','Device group','Instance group'];
+    const rows=(info.instances||[]).map(i=>`<div class="field" style="flex-wrap:wrap">
+      <span>Instance ${i.instance} · type ${i.type??'unknown'} · ${i.enabled?'enabled':'disabled'}</span>
+      <button onclick="setInstanceEnabled(${a},${i.instance},${!i.enabled})">${i.enabled?'Disable':'Enable'}</button>
+      <select id="scheme_${i.instance}">
+        ${i.scheme===null?'<option value="" selected disabled>Unknown scheme</option>':''}
+        ${schemes.map((label,n)=>`<option value="${n}" ${i.scheme===n?'selected':''}>${label}</option>`).join('')}
+      </select>
+      <button onclick="setInstanceScheme(${a},${i.instance})">Set scheme</button>
+      ${i.type===1?`<button onclick="openPushbutton(${a},${i.instance})">Button timers / filters</button>`:''}
+    </div>`).join('');
+    $("#devInstances").innerHTML=rows||'<span class="muted">No instances reported.</span>';
+    $("#devicePushbutton").innerHTML='';
+  }catch(e){ if(SELDEV===a) $("#devInstances").textContent="Failed: "+e.message; }
+}
+async function setDeviceController(addr,enabled){
+  try{ await post(`api/device/${addr}/application_controller`,{enabled}); await loadDevice(addr); }
+  catch(e){toast(e.message);}
+}
+async function setInstanceEnabled(addr,instance,enabled){
+  try{ await post(`api/device/${addr}/instance/${instance}/enabled`,{enabled}); await loadDevice(addr); }
+  catch(e){toast(e.message);}
+}
+async function setInstanceScheme(addr,instance){
+  const value=$("#scheme_"+instance).value;
+  if(value==='') return;
+  try{ await post(`api/device/${addr}/instance/${instance}/scheme`,{scheme:+value}); await loadDevice(addr); }
+  catch(e){toast(e.message);}
+}
+async function saveDevice(addr){
+  try{ await post(`api/device/${addr}/save`); toast('Save sent. Verify settings after a power cycle.'); }
+  catch(e){toast(e.message);}
+}
+function openPushbutton(addr,instance){
+  $("#devicePushbutton").innerHTML=pbCard(addr);
+  $("#pbInst").value=instance;
+  readPb(addr);
 }
 async function changeDevAddr(a){
   const n=+$("#newDevAddr").value;
@@ -475,6 +519,10 @@ async function readPb(addr){
   try{
     const d=await api(`api/device/${addr}/pb/${inst}`);
     $("#pbType").textContent="type "+(d.instance_type??'–')+(d.instance_type===1?" (push button)":"");
+    if(d.instance_type!==1){
+      $("#pbBody").textContent='Timers and filters require a Part 301 (type 1) instance.';
+      return;
+    }
     const t=d.timers||{};
     const timerRow=(k,label,unit)=>`<div class="field"><label>${label}</label>
       <input type="number" id="pbT_${k}" value="${t[k]??''}" min="0" max="255" style="width:80px">

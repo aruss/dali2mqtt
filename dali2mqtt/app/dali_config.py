@@ -116,8 +116,10 @@ def _val(resp):
 class DaliConfig:
     def __init__(self, driver, busy=None):
         self.driver = driver
-        # Serialises multi-command config operations against each other.
-        self._lock = asyncio.Lock()
+        # Share the guard across startup discovery and the configuration UI.
+        if not hasattr(driver, "_config_lock"):
+            driver._config_lock = asyncio.Lock()
+        self._lock = driver._config_lock
         # Optional asyncio.Event the bridge watches to pause its bus traffic
         # while a config operation is running (prevents a re-read storm).
         self._busy = busy
@@ -700,37 +702,168 @@ class DaliConfig:
         return {"ok": True}
 
     async def read_device(self, addr):
-        """Read details of one control device (instances + pushbutton timers)."""
+        """Read controller capabilities/state and generic instance settings."""
         if not _HAVE_DEVICE:
             raise RuntimeError("control device support requires python-dali 0.11")
         await self._ready()
-        short = address.DeviceShort(addr)
+        short = self._device_short(addr)
         async with self._guard():
-            n = _val(await self._q(device.QueryNumberOfInstances(short))) or 0
+            await self._require_device(short)
+            n = await self._instance_count(short)
             op = _val(await self._q(device.QueryOperatingMode(short)))
+            caps = _val(await self._q(device.QueryDeviceCapabilities(short)))
+            controller = await self._controller_state(short, caps)
             instances = []
             for i in range(n):
                 inst = {"instance": i}
                 inst["type"] = _val(
-                    await self._q(device.QueryInstanceType(short, i))
+                    await self._q(device.QueryInstanceType(short, InstanceNumber(i)))
                     if hasattr(device, "QueryInstanceType")
                     else None
                 )
+                inst["enabled"] = await self._enabled_state(short, InstanceNumber(i))
+                inst["scheme"] = _val(await self._q(
+                    device.QueryEventScheme(short, InstanceNumber(i))))
                 instances.append(inst)
-        return {"address": addr, "operating_mode": op, "instances": instances}
+        return {"address": addr, "operating_mode": op, "instances": instances,
+                "application_controller": controller}
+
+    @staticmethod
+    def _device_short(addr):
+        if type(addr) is not int or not 0 <= addr <= 63:
+            raise ValueError("device address must be an integer from 0 to 63")
+        return address.DeviceShort(addr)
+
+    async def _require_device(self, short):
+        if _val(await self._q(device.QueryDeviceStatus(short))) is None:
+            raise RuntimeError("device did not respond to status query")
+
+    async def _instance_count(self, short):
+        count = _val(await self._q(device.QueryNumberOfInstances(short)))
+        if count is None or not 0 <= count <= 32:
+            raise RuntimeError("device instance count unavailable or invalid")
+        return count
+
+    async def _require_instance(self, short, instance):
+        await self._require_device(short)
+        if instance >= await self._instance_count(short):
+            raise ValueError("instance does not exist on this device")
+        return InstanceNumber(instance)
+
+    @staticmethod
+    def _instance_number(instance):
+        if type(instance) is not int or not 0 <= instance <= 31:
+            raise ValueError("instance must be an integer from 0 to 31")
+        return instance
+
+    @staticmethod
+    def _boolean(enabled):
+        if type(enabled) is not bool:
+            raise ValueError("enabled must be a boolean")
+
+    async def _enabled_state(self, short, inst):
+        result = _val(await self._q(device.QueryInstanceEnabled(short, inst)))
+        # NO is silence on DALI. Check device presence after the query so a
+        # disconnected device is never reported as a disabled instance.
+        await self._require_device(short)
+        if result not in (0, 1):
+            raise RuntimeError("instance enabled state unavailable")
+        return bool(result)
+
+    async def _controller_state(self, short, caps):
+        if caps is None:
+            return {"present": None, "always_active": None, "enabled": None}
+        present, always = bool(caps & 1), bool(caps & 4)
+        enabled = False
+        if present:
+            value = _val(await self._q(device.QueryApplicationControlEnabled(short)))
+            await self._require_device(short)
+            enabled = bool(value) if value in (0, 1) else None
+        return {"present": present, "always_active": always, "enabled": enabled}
+
+    async def set_application_controller(self, addr, enabled):
+        short = self._device_short(addr)
+        self._boolean(enabled)
+        await self._ready()
+        async with self._guard():
+            await self._require_device(short)
+            caps = _val(await self._q(device.QueryDeviceCapabilities(short)))
+            if caps is None or not caps & 1:
+                raise ValueError("device has no confirmed application controller")
+            if not enabled and caps & 4:
+                raise ValueError("application controller is always active")
+            cmd = device.EnableApplicationController if enabled else device.DisableApplicationController
+            await self.driver.send(cmd(short))
+            state = await self._controller_state(short, caps)
+            if state["enabled"] is not enabled:
+                raise RuntimeError("application controller readback mismatch")
+        return {"ok": True, "application_controller": state}
+
+    async def set_instance_enabled(self, addr, instance, enabled):
+        short = self._device_short(addr)
+        self._instance_number(instance)
+        self._boolean(enabled)
+        await self._ready()
+        async with self._guard():
+            inst = await self._require_instance(short, instance)
+            cmd = device.EnableInstance if enabled else device.DisableInstance
+            await self.driver.send(cmd(short, inst))
+            actual = await self._enabled_state(short, inst)
+            if actual is not enabled:
+                raise RuntimeError("instance enabled readback mismatch")
+        return {"ok": True, "enabled": actual}
+
+    async def save_device(self, addr):
+        short = self._device_short(addr)
+        await self._ready()
+        async with self._guard():
+            await self._require_device(short)
+            await self.driver.send(device.SavePersistentVariables(short))
+            await self._require_device(short)
+        return {"ok": True, "persistence_verified": False}
+
+    async def refresh_instance_map(self):
+        """Rebuild this bus's shared decoder map using addressed queries only."""
+        mapper = getattr(self.driver, "dev_inst_map", None)
+        if mapper is None:
+            return
+        await self._ready()
+        async with self._guard():
+            mapper.clear()
+            for addr in range(64):
+                short = address.DeviceShort(addr)
+                if _val(await self._q(device.QueryDeviceStatus(short))) is None:
+                    continue
+                count = _val(await self._q(device.QueryNumberOfInstances(short)))
+                if count is None or not 0 <= count <= 32:
+                    continue
+                for i in range(count):
+                    itype = _val(await self._q(device.QueryInstanceType(short, InstanceNumber(i))))
+                    if itype is not None and 0 <= itype <= 31:
+                        mapper.add_type(short_address=addr, instance_number=i, instance_type=itype)
 
     async def change_device_address(self, old, new):
         """Change the short address of a control device."""
         if not _HAVE_DEVICE:
             raise RuntimeError("control device support requires python-dali 0.11")
         await self._ready()
-        if not (0 <= int(new) <= 63):
-            raise ValueError("new address out of range")
-        async with self._guard():
-            await self.driver.send(device.DTR0(int(new)))
-            await self.driver.send(
-                device.SetShortAddress(address.DeviceShort(int(old)))
-            )
+        short = self._device_short(old)
+        new_short = self._device_short(new)
+        try:
+            async with self._guard():
+                await self._require_device(short)
+                if old == new:
+                    return {"ok": True}
+                status = await self._q(device.QueryDeviceStatus(new_short))
+                if getattr(status, "raw_value", None) is not None:
+                    raise ValueError("new device address already occupied")
+                def seq():
+                    yield device.DTR0(new)
+                    yield device.SetShortAddress(short)
+                await self.driver.run_sequence(seq())
+                await self._require_device(new_short)
+        finally:
+            await self.refresh_instance_map()
         return {"ok": True}
 
     async def commission_devices(self, readdress=False, dry_run=False,
@@ -790,7 +923,11 @@ class DaliConfig:
 
         def _seq():
             # Which short addresses are free to hand out?
-            available = list(range(64))
+            available = []
+            for a in range(64):
+                status = yield device.QueryDeviceStatus(address.DeviceShort(a))
+                if readdress or getattr(status, "raw_value", None) is None:
+                    available.append(a)
             yield device.Terminate()
             # 0x00 = all control devices react; 0x7F = only those without a
             # short address (Part 103 INITIALISE argument).
@@ -833,8 +970,11 @@ class DaliConfig:
                         break
             yield device.Terminate()
 
-        async with self._guard():
-            await self.driver.run_sequence(_seq())
+        try:
+            async with self._guard():
+                await self.driver.run_sequence(_seq())
+        finally:
+            await self.refresh_instance_map()
         logger.info(
             "Device commissioning done: found=%d programmed=%s dry_run=%s",
             found["n"], programmed, dry_run,
@@ -996,17 +1136,29 @@ class DaliConfig:
             )
         return {"ok": True, "result": int(result) if result is not None else None}
 
-    async def set_pushbutton_scheme(self, addr, instance, scheme):
+    async def set_instance_scheme(self, addr, instance, scheme):
         """Set the event addressing scheme for an instance."""
         if not _HAVE_DEVICE:
             raise RuntimeError("control device support requires python-dali 0.11")
+        short = self._device_short(addr)
+        self._instance_number(instance)
+        if type(scheme) is not int:
+            raise ValueError("scheme must be an integer")
+        scheme = EventScheme(scheme)
         await self._ready()
-        short = address.DeviceShort(addr)
-        inst = InstanceNumber(int(instance))
         async with self._guard():
+            inst = await self._require_instance(short, instance)
             result = await self.driver.run_sequence(
                 devseq.SetEventSchemes(
-                    device=short, instance=inst, scheme=EventScheme(int(scheme))
+                    device=short, instance=inst, scheme=scheme
                 )
             )
-        return {"ok": True, "result": int(result) if result is not None else None}
+            actual = _val(result)
+            await self._require_device(short)
+            if actual != scheme:
+                raise RuntimeError("event scheme readback mismatch")
+        return {"ok": True, "result": actual, "scheme": actual}
+
+    async def set_pushbutton_scheme(self, addr, instance, scheme):
+        """Compatibility entry point; event schemes apply to every instance type."""
+        return await self.set_instance_scheme(addr, instance, scheme)

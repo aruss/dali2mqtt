@@ -13,6 +13,8 @@ import dali.address as address
 import dali.gear.general as gear
 from dali.command import YesNoResponse
 from dali.exceptions import DALIError
+from dali.device.general import _Event
+from dali.device.helpers import DeviceInstanceTypeMapper
 from dali.gear.general import Off, SetFadeTime
 from asyncio_paho import AsyncioPahoClient
 from slugify import slugify
@@ -225,16 +227,27 @@ def publish_bus_event(command, response):
             addr_num, dest_kind = dest.group, "group"
         elif isinstance(dest, address.Broadcast):
             dest_kind = "broadcast"
-        payload = json.dumps(
-            {
-                "command": str(command),
-                "type": name,
-                "address": addr_num,
-                "destination_kind": dest_kind,
-                "destination": str(dest) if dest is not None else "",
-                "response": str(response) if response is not None else None,
-            }
-        )
+        event_payload = {
+            "command": str(command),
+            "type": name,
+            "address": addr_num,
+            "destination_kind": dest_kind,
+            "destination": str(dest) if dest is not None else "",
+            "response": str(response) if response is not None else None,
+        }
+        if isinstance(command, _Event):
+            source = command.short_address
+            event_payload.update(
+                event=True,
+                source_address=source.address if source is not None else None,
+                instance_number=command.instance_number,
+                instance_type=command.instance_type,
+                device_group=command.device_group,
+                instance_group=command.instance_group,
+                event_info=command.frame.as_integer & 0x3FF,
+                raw_frame=command.frame.as_integer,
+            )
+        payload = json.dumps(event_payload)
         client.publish(f"{base}/bus_event", payload)
     except Exception as err:  # noqa: BLE001
         logger.debug("bus_event publish failed: %s", err)
@@ -513,12 +526,14 @@ async def on_connect(client, data_object, flags, result):  # pylint: disable=W06
     # Queue processes state updates triggered by physical DALI bus traffic.
     data_object["queue"] = asyncio.Queue()
 
-    await start_listening_on_dali(data_object)
-    await initialize_lamps(data_object, client)
-    await register_bridge(client)
-    # Expose runtime refs to the config web UI (for discovery refresh).
     _runtime["data"] = data_object
     _runtime["client"] = client
+    await start_listening_on_dali(data_object)
+    from .dali_config import DaliConfig
+
+    await DaliConfig(data_object["driver"], busy=config_busy).refresh_instance_map()
+    await initialize_lamps(data_object, client)
+    await register_bridge(client)
     await asyncio.create_task(process_queue(client, data_object))
 
 
@@ -660,6 +675,9 @@ def print_command_and_response(data_object, dev, command, response, config_comma
         if not command:
             logger.info("%s -> %s", command, response)
             return
+        if isinstance(command, _Event):
+            publish_bus_event(command, response)
+            return
         if not hasattr(command, "destination"):
             return
 
@@ -752,7 +770,7 @@ def build_driver(config, event_loop):
         # python-dali 0.11 dropped the glob/loop kwargs; pass the device path
         # (a plain path or a glob such as /dev/hidraw0 or /dev/dali/daliusb-*).
         device = config[CONF_DALI_DEVICE] or "/dev/dali/daliusb-*"
-        return tridonic(device)
+        return tridonic(device, dev_inst_map=DeviceInstanceTypeMapper())
 
     if driver_name == DALI_SERVER:
         from dali.driver.daliserver import DaliServer
