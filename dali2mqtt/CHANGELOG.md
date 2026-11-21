@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.16.1
+
+- Target amd64 Home Assistant hosts with the Debian Bookworm base and Python 3.11.
+- Clear inherited APT indexes and fail the build on any index-refresh error,
+  retrying downloads before installing the existing system dependencies.
+- Prepare installation from the aruss/dali2mqtt fork, retaining upstream credits.
+- Add amd64 container-build and dependency smoke checks to CI.
+
 ## 1.15.0
 
 - **DALI command console** (⌘ Commands): send curated commands (Off, Recall

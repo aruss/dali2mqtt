@@ -1,4 +1,4 @@
-ARG BUILD_FROM
+ARG BUILD_FROM=ghcr.io/home-assistant/base-debian:bookworm
 FROM ${BUILD_FROM}
 
 ENV LANG=C.UTF-8 \
@@ -7,7 +7,8 @@ ENV LANG=C.UTF-8 \
     S6_KEEP_ENV=1
 
 # System + build dependencies for python-dali / hidapi / pyusb
-RUN apt-get update \
+RUN rm -rf /var/lib/apt/lists/* \
+    && apt-get -o Acquire::Retries=3 update --error-on=any \
     && apt-get install -y --no-install-recommends \
         python3 \
         python3-venv \
@@ -22,7 +23,7 @@ RUN apt-get update \
         libudev-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Isolated virtualenv (Debian bullseye externally managed)
+# Isolated virtualenv for Debian Bookworm's externally managed Python
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 

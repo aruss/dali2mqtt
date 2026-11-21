@@ -15,3 +15,35 @@ jobs:
       - name: Run tests
         working-directory: dali2mqtt
         run: python -m pytest
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build amd64 add-on
+        run: >-
+          docker build --platform linux/amd64 --pull --no-cache --progress=plain
+          --tag dali2mqtt:test dali2mqtt
+      - name: Check runtime dependencies and CLI
+        run: |
+          docker run --rm --platform linux/amd64 --entrypoint /bin/bash dali2mqtt:test -euc '
+            pip check
+            python -m app --help
+            python -c "import dali; import dali.driver.hid; import hid; import usb.core; import usb.backend.libusb1; assert usb.backend.libusb1.get_backend() is not None"
+            command -v bashio
+            command -v jq
+          '
+      - name: Verify strict APT refresh rejects an unreachable source
+        run: |
+          docker run --rm --platform linux/amd64 --entrypoint /bin/bash dali2mqtt:test -euc '
+            printf "%s\n" "deb http://127.0.0.1:1/debian bookworm main" > /tmp/unreachable.list
+            rm -rf /var/lib/apt/lists/*
+            if apt-get -o Acquire::Retries=3 update --error-on=any \
+                -o Dir::Etc::sourcelist=/tmp/unreachable.list \
+                -o Dir::Etc::sourceparts=-; then
+              echo "ERROR: strict APT refresh unexpectedly succeeded" >&2
+              exit 1
+            else
+              status=$?
+              test "$status" -eq 100
+            fi
+          '

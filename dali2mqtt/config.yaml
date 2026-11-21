@@ -1,17 +1,13 @@
 ---
 name: DALI2MQTT
-version: "1.16.0"
+version: "1.16.1"
 slug: dali2mqtt
 description: >-
   DALI <-> MQTT bridge with Home Assistant MQTT discovery for DALI lighting
   controllers (hasseb, Tridonic, daliserver).
-url: https://github.com/justinasjaronis/dali2mqtt
+url: https://github.com/aruss/dali2mqtt
 arch:
-  - aarch64
   - amd64
-  - armv7
-  - armhf
-  - i386
 init: false
 startup: services
 boot: auto

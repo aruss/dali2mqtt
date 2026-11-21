@@ -18,8 +18,10 @@ DALI-2 control-device / push-button support.
 ## 1. Installation
 
 1. In Home Assistant go to **Settings → Add-ons → Add-on Store**.
-2. Add this repository (**⋮ → Repositories**) if it is not already installed,
-   then install **DALI2MQTT**.
+2. Add `https://github.com/aruss/dali2mqtt` (**⋮ → Repositories**),
+   then install **DALI2MQTT 1.16.1** from **aruss add-ons** (amd64 hosts only).
+   This creates a separate repository entry; existing upstream installations are
+   not automatically replaced or migrated.
 3. Make sure you have an **MQTT broker** (e.g. the *Mosquitto broker* add-on)
    and the **MQTT integration** configured in Home Assistant. This add-on
    auto-discovers the broker through the Supervisor MQTT service; you only need
