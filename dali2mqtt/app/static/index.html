@@ -50,6 +50,26 @@
   .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--muted);border-top-color:transparent;border-radius:50%;animation:s .7s linear infinite;vertical-align:-2px}
   @keyframes s{to{transform:rotate(360deg)}}
   .empty{padding:40px;text-align:center;color:var(--muted)}
+  .monitor-card{min-width:0}
+  .monitor-tools,.monitor-find{align-items:center;margin:10px 0}
+  .monitor-tools label,.monitor-find label{display:flex;align-items:center;gap:5px}
+  .monitor-tools input[type=text],.monitor-find input,.monitor-tools select{font:inherit;padding:5px 7px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);max-width:190px}
+  .monitor-download{display:inline-block;color:var(--ink);text-decoration:none;padding:6px 12px;border:1px solid var(--line);border-radius:8px}
+  .monitor-download:hover{border-color:var(--accent)}
+  .monitor-filters{margin:10px 0}
+  .monitor-error{color:var(--warn);margin:6px 0;white-space:pre-wrap}
+  .monitor-table-scroll{max-height:60vh;overflow:auto;border:1px solid var(--line);border-radius:8px}
+  .monitor-table{width:100%;border-collapse:collapse;font-size:12px;text-align:left}
+  .monitor-table th{position:sticky;top:0;background:var(--chip);z-index:1;white-space:nowrap}
+  .monitor-table th,.monitor-table td{padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}
+  .monitor-table td:nth-child(1),.monitor-table td:nth-child(3),.monitor-table td:nth-child(6),.monitor-table td:nth-child(7){white-space:nowrap}
+  .monitor-table td:nth-child(5){min-width:180px}
+  .monitor-table td:nth-child(8){min-width:230px;max-width:400px}
+  .monitor-table tr.monitor-match{background:color-mix(in srgb,#e9bd30 18%,var(--panel))}
+  .monitor-table tr.monitor-selected{background:color-mix(in srgb,var(--accent) 22%,var(--panel));outline:2px solid var(--accent);outline-offset:-2px}
+  .monitor-expand{border:0;background:transparent;padding:0;white-space:nowrap;font-size:12px}
+  .monitor-details pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;max-height:340px;overflow:auto}
+  .monitor-notice{font-size:12px;margin-top:10px}
 </style>
 </head>
 <body>
@@ -75,6 +95,7 @@
 </div>
 <div id="toast"></div>
 
+<script src="static/monitor.js"></script>
 <script>
 const $ = s => document.querySelector(s);
 let GEAR = [];        // control gear scan results
@@ -607,55 +628,7 @@ async function writeMemory(addr, isDev){
   }catch(e){ toast("Write failed: "+e.message); }
 }
 
-// ---- Bus monitor (find DALI-1 switches by watching what they transmit) ----
-let monOn=false, monLast=0, monTimer=null, monEvents=[], monHidePolls=true;
-function toggleMonitor(){ monOn?stopMonitor():startMonitor(); }
-// A frame is "bridge polling/noise" if it's a query or carries a response.
-function isPoll(e){ return /^Query/i.test(e.cmd||"") || (e.resp && e.resp.length>0); }
-function startMonitor(){
-  monOn=true; monEvents=[]; $("#btnMon").classList.add("primary"); $("#btnMon").textContent="⏹ Stop monitor";
-  SEL=null; SELDEV=null; renderList();
-  $("#detail").innerHTML=`
-    <div class="card">
-      <h2>Bus monitor <span class="muted" style="font-weight:400">— live DALI traffic</span></h2>
-      <div class="muted">Press a physical button/switch now. DALI-1 switches have no address and
-        can't be scanned — but you can see the command they broadcast here (e.g.
-        <code>GoToScene(GroupN, x)</code>, <code>RecallMaxLevel(GroupN)</code>, <code>Off(...)</code>).</div>
-      <div class="cmds" style="margin:10px 0;align-items:center">
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-          <input type="checkbox" id="monFilter" ${monHidePolls?'checked':''} onchange="monHidePolls=this.checked;renderMonitor()">
-          Hide bridge polling (show only button/control commands)</label>
-        <button onclick="clearMonitor()">Clear</button>
-        <span id="monStat" class="muted">listening…</span></div>
-      <pre id="monLog" style="background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;max-height:60vh;overflow:auto;white-space:pre-wrap;font-size:12px;margin:0"></pre>
-    </div>`;
-  pollMonitor();
-  monTimer=setInterval(pollMonitor, 1000);
-}
-function stopMonitor(){
-  monOn=false; if(monTimer) clearInterval(monTimer); monTimer=null;
-  $("#btnMon").classList.remove("primary"); $("#btnMon").textContent="🔎 Bus monitor";
-  const s=$("#monStat"); if(s) s.textContent="stopped";
-}
-function clearMonitor(){ monEvents=[]; renderMonitor(); }
-function renderMonitor(){
-  const log=$("#monLog"); if(!log) return;
-  let evs = monHidePolls ? monEvents.filter(e=>!isPoll(e)) : monEvents;
-  evs = evs.slice(-500);
-  log.textContent = evs.map(e=>`${e.t}  ${e.err?'⚠ ':''}${e.cmd}${e.resp?('   -> '+e.resp):''}`).join("\n");
-  log.scrollTop=log.scrollHeight;
-  const s=$("#monStat"); if(s) s.textContent = evs.length+(monHidePolls?" control frames":" frames")+" ("+monEvents.length+" total)";
-}
-async function pollMonitor(){
-  if(!monOn) return;
-  try{
-    const d=await api("api/monitor?since="+monLast);
-    monLast=d.last||monLast;
-    for(const e of (d.events||[])) monEvents.push(e);
-    if(monEvents.length>2000) monEvents=monEvents.slice(-2000);
-    renderMonitor();
-  }catch(e){ const s=$("#monStat"); if(s) s.textContent="error: "+e.message; }
-}
+// Bus monitor implementation is in static/monitor.js.
 
 // ---- Lunatone config scan (read bank 3 of every gear to find switches) ----
 async function scanLunatone(){

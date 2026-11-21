@@ -21,7 +21,7 @@ For Jung 1745 DSTE input controls, see the [Jung setup guide and HA blueprint](J
 
 1. In Home Assistant go to **Settings → Add-ons → Add-on Store**.
 2. Add `https://github.com/aruss/dali2mqtt` (**⋮ → Repositories**),
-   then install **DALI2MQTT 1.17.0** from **aruss add-ons** (amd64 hosts only).
+   then install **DALI2MQTT 1.18.1** from **aruss add-ons** (amd64 hosts only).
    This creates a separate repository entry; existing upstream installations are
    not automatically replaced or migrated.
 3. Make sure you have an **MQTT broker** (e.g. the *Mosquitto broker* add-on)
@@ -137,10 +137,23 @@ Lists DALI-2 control devices (buttons/sensors). Selecting one shows:
 
 ### Bus Monitor (top toolbar → **🔎 Bus monitor**)
 
-A live view of DALI bus traffic. Press a physical switch to see the command it
-broadcasts (e.g. `GoToScene(<Group 8>, 4)`, `RecallMaxLevel(...)`, `Off(...)`).
-Tick **Hide bridge polling** to show only button/control commands. This is how
-you identify a DALI-1 switch and find the address it targets.
+Continuous capture starts with the bridge, even before this screen opens.
+Tridonic reports appear in an eight-column table with expandable full details;
+decoded transactions and application diagnostics have separate views. Other
+drivers provide decoded-only monitoring where supported; hasseb cannot observe
+external masters.
+
+Use **find Hex**, **find Addr**, and **find Cmd** together to highlight matches
+without hiding surrounding traffic. Enter/Shift+Enter finds next/previous across
+100-row pages. Optional filters, including **Hide queries**, start disabled.
+**Pause display**, **Follow latest**, and **Clear view** affect only this browser.
+Capture retains 10,000 shared records; JSONL/text downloads include the whole
+retained snapshot regardless of display filters.
+
+Gear addresses identify destinations, not the physical sender. Receipt times
+are host times, and adapter-origin hints cannot prove ownership. Read
+[Bus monitor](MONITOR.md) for controls, record/API/export formats, retention,
+capabilities, gap/reset notices, and interpretation limits.
 
 ### Memory Bank Tool
 

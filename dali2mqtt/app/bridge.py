@@ -25,6 +25,7 @@ from .devicesnamesconfig import DevicesNamesConfig
 from .group import Group
 from .ha_mirror import HAEntityMirror
 from .lamp import Lamp
+from .bus_monitor import get_monitor
 
 logging.basicConfig(format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
@@ -743,6 +744,7 @@ def print_command_and_response(data_object, dev, command, response, config_comma
 async def start_listening_on_dali(data_object):
     """Start listening on the DALI bus."""
     dev = data_object["driver"]
+    get_monitor(dev, busy=config_busy)
     dev.bus_traffic.register(functools.partial(print_command_and_response, data_object))
     dev.connect()
     logger.debug("Waiting for device...")
@@ -762,22 +764,28 @@ def build_driver(config, event_loop):
         from dali.driver.hid import hasseb
 
         device = config[CONF_DALI_DEVICE] or "/dev/dali/hasseb-*"
-        return hasseb(device)
+        driver = hasseb(device)
+        get_monitor(driver, driver_name=HASSEB, busy=config_busy)
+        return driver
 
     if driver_name == TRIDONIC:
-        from dali.driver.hid import tridonic
+        from .monitored_tridonic import MonitoredTridonic
 
         # python-dali 0.11 dropped the glob/loop kwargs; pass the device path
         # (a plain path or a glob such as /dev/hidraw0 or /dev/dali/daliusb-*).
         device = config[CONF_DALI_DEVICE] or "/dev/dali/daliusb-*"
-        return tridonic(device, dev_inst_map=DeviceInstanceTypeMapper())
+        driver = MonitoredTridonic(device, dev_inst_map=DeviceInstanceTypeMapper())
+        get_monitor(driver, busy=config_busy)
+        return driver
 
     if driver_name == DALI_SERVER:
         from dali.driver.daliserver import DaliServer
 
-        return DaliServer(
+        driver = DaliServer(
             config[CONF_DALI_SERVER_HOST], config[CONF_DALI_SERVER_PORT]
         )
+        get_monitor(driver, driver_name=DALI_SERVER, busy=config_busy)
+        return driver
 
     raise SetupError(f"Unsupported DALI driver: {driver_name}")
 

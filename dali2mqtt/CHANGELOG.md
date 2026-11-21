@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.18.1
+
+- Capture Tridonic USB reports continuously from startup in a shared, bounded
+  10,000-record buffer, retaining repeats, replies, adapter status, and unknown
+  or malformed reports alongside separate decoded transaction summaries.
+- Decode frame destinations and DALI-2 event sources with the shared instance
+  mapper and observed device-type context. Record connection transitions and
+  configuration-operation outcomes without inferring sender ownership.
+- Add paginated capture reads with reset/gap metadata and complete JSONL/text
+  snapshot downloads while preserving the legacy monitor and learning API.
+- Replace the plain log with an eight-column monitor, expandable details,
+  combined Hex/Addr/Cmd find controls, filters, paging, pause/follow, and local
+  clear controls. Keep exports independent of display filters.
+- Document capture limits and driver capabilities. Prepare this release locally;
+  publication, installation, and physical acceptance remain separate actions.
+
 ## 1.17.0
 
 - Publish DALI-2 input events to MQTT with source address, instance identity,

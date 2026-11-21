@@ -25,6 +25,15 @@ jobs:
       - name: Run tests
         working-directory: dali2mqtt
         run: python -m pytest
+  monitor-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Run monitor UI regression tests
+        run: node --test dali2mqtt/tests/test_monitor_ui.js
   container:
     runs-on: ubuntu-latest
     steps:

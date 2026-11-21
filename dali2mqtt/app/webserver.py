@@ -6,6 +6,8 @@ Runs inside the bridge's asyncio loop and shares its python-dali driver via
 import json
 import logging
 import os
+import re
+from uuid import UUID
 
 from aiohttp import web
 
@@ -70,6 +72,8 @@ class DaliWebServer:
         app.router.add_post("/api/device/{addr}/instance/{instance}/scheme", self.api_device_setting)
         app.router.add_post("/api/device/{addr}/save", self.api_device_setting)
         app.router.add_get("/api/monitor", self.api_monitor)
+        app.router.add_get("/api/monitor/records", self.api_monitor_records)
+        app.router.add_get("/api/monitor/export", self.api_monitor_export)
         # Memory bank tool
         app.router.add_get("/api/memory", self.api_memory_read)
         app.router.add_post("/api/memory/write", self.api_memory_write)
@@ -392,6 +396,73 @@ class DaliWebServer:
         events = self.cfg.monitor_events(since)
         last = events[-1]["seq"] if events else since
         return _json({"events": events, "last": last})
+
+    @staticmethod
+    def _monitor_parameter(request, name, default=None):
+        values = request.query.getall(name, [])
+        if len(values) > 1:
+            raise ValueError(f"{name} must occur at most once")
+        return values[0] if values else default
+
+    async def api_monitor_records(self, request):
+        """Read shared capture without changing another client's cursor/history."""
+        try:
+            since_text = self._monitor_parameter(request, "since", "0")
+            limit_text = self._monitor_parameter(request, "limit", "500")
+            if not re.fullmatch(r"[0-9]+", since_text):
+                raise ValueError("since must be a nonnegative integer")
+            if not re.fullmatch(r"[0-9]+", limit_text):
+                raise ValueError("limit must be an integer from 1 to 500")
+            capture_id = self._monitor_parameter(request, "capture_id")
+            if capture_id is not None:
+                try:
+                    capture_id = str(UUID(capture_id))
+                except ValueError:
+                    raise ValueError("capture_id must be a UUID") from None
+            result = self.cfg.monitor.records_since(
+                since=int(since_text), limit=int(limit_text), capture_id=capture_id,
+            )
+        except ValueError as err:
+            return _json({"error": str(err)}, 400)
+        return _json(result)
+
+    async def api_monitor_export(self, request):
+        """Serialize one complete retained snapshot, independent of UI filters."""
+        try:
+            export_format = self._monitor_parameter(request, "format", "jsonl")
+            if export_format not in ("jsonl", "text"):
+                raise ValueError("format must be jsonl or text")
+        except ValueError as err:
+            return _json({"error": str(err)}, 400)
+
+        snapshot = self.cfg.monitor.snapshot()
+        metadata = {key: value for key, value in snapshot.items() if key != "records"}
+        metadata["record_type"] = "metadata"
+        records = snapshot["records"]
+        if export_format == "jsonl":
+            body = "\n".join(json.dumps(item, ensure_ascii=False) for item in [metadata, *records]) + "\n"
+            content_type = "application/x-ndjson"
+            extension = "jsonl"
+        else:
+            lines = ["DALI bus monitor export", "Metadata: " + json.dumps(metadata, ensure_ascii=False)]
+            for record in records:
+                frame = record.get("frame") or {}
+                decoded = record.get("decoded") or {}
+                lines.append(
+                    f"{record['seq']}  {record['received_utc']}  {record['classification']}"
+                    f"  {frame.get('hex') or '—'}  {decoded.get('command_text') or '—'}"
+                )
+                # Full structured data follows the readable summary, retaining
+                # unknown reports, replies, adapter metadata and diagnostics.
+                lines.append("  " + json.dumps(record, ensure_ascii=False))
+            body = "\n".join(lines) + "\n"
+            content_type = "text/plain"
+            extension = "txt"
+        filename = f"dali-monitor-{snapshot['capture_id']}.{extension}"
+        return web.Response(
+            text=body, content_type=content_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     # ------------------------------------------------------ memory bank tool
     async def api_memory_read(self, request):

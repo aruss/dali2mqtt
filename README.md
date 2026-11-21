@@ -10,13 +10,16 @@ installable Home Assistant add-on. Fork of
 1. Home Assistant → **Settings → Add-ons → Add-on Store**.
 2. **⋮ → Repositories** → add this repository URL:
    `https://github.com/aruss/dali2mqtt`
-3. Install **DALI2MQTT 1.17.0** from **aruss add-ons**, set the options, start it.
+3. Install **DALI2MQTT 1.18.1** from **aruss add-ons**, set the options, start it.
 
 This fork supports **amd64 (x86-64)** Home Assistant hosts only. Adding its URL
 creates a separate repository entry from the upstream add-on; an existing upstream
 installation is not automatically replaced or migrated.
 
 Full documentation and every option is in [dali2mqtt/DOCS.md](dali2mqtt/DOCS.md).
+
+[Bus monitor](dali2mqtt/MONITOR.md) covers continuous Tridonic capture, table/find
+controls, trace downloads, API records, and interpretation limits.
 
 [Jung 1745 DSTE setup](dali2mqtt/JUNG.md) covers independent MQTT input controls,
 device settings, and the reusable Home Assistant blueprint.
@@ -84,7 +87,8 @@ so there is no license conflict. All original copyright notices are retained in
 cd dali2mqtt
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
-pytest                      # 58 unit/module tests, no hardware required
+pytest                      # unit/module tests, no hardware required
+node --test tests/test_monitor_ui.js  # monitor browser-state regressions, no npm dependencies
 ```
 
 Tests use a fake DALI driver (see `tests/conftest.py`); CI runs them on every

@@ -10,8 +10,6 @@ duration.
 import asyncio
 import contextlib
 import logging
-import time
-from collections import deque
 
 import dali.address as address
 import dali.gear.general as gear
@@ -19,6 +17,8 @@ from dali.command import YesNoResponse
 from dali.exceptions import DALIError
 from dali.sequences import Commissioning
 from dali.sequences import sleep as seq_sleep
+
+from .bus_monitor import get_monitor
 
 try:
     import dali.gear.colour as _colour
@@ -123,56 +123,20 @@ class DaliConfig:
         # Optional asyncio.Event the bridge watches to pause its bus traffic
         # while a config operation is running (prevents a re-read storm).
         self._busy = busy
-        # Bus monitor: a ring buffer of recent bus frames, for spotting what a
-        # (DALI-1) push-button transmits when pressed.
-        self._monitor = deque(maxlen=400)
-        self._mon_seq = 0
-        self._mon_registered = False
+        self.monitor = get_monitor(driver, busy=busy)
 
     async def _ready(self):
         await self.driver.connected.wait()
 
     # ------------------------------------------------------------- bus monitor
-    def _ensure_monitor(self):
-        if not self._mon_registered:
-            try:
-                self.driver.bus_traffic.register(self._on_traffic)
-                self._mon_registered = True
-            except Exception as err:  # noqa: BLE001
-                logger.error("Could not register bus monitor: %s", err)
-
-    def _on_traffic(self, dev, command, response, config_command_error):
-        try:
-            self._mon_seq += 1
-            ctype = type(command).__name__ if command is not None else ""
-            caddr = None
-            dest = getattr(command, "destination", None)
-            if isinstance(dest, address.Short):
-                caddr = dest.address
-            self._monitor.append(
-                {
-                    "seq": self._mon_seq,
-                    "t": time.strftime("%H:%M:%S"),
-                    "cmd": str(command) if command is not None else "",
-                    "type": ctype,
-                    "address": caddr,
-                    "resp": str(response) if response is not None else "",
-                    "err": bool(config_command_error),
-                }
-            )
-        except Exception:  # noqa: BLE001
-            pass
-
     def monitor_events(self, since=0):
-        """Return buffered bus frames newer than ``since`` (registers on first use)."""
-        self._ensure_monitor()
-        return [e for e in self._monitor if e["seq"] > since]
+        """Return legacy decoded events from the shared continuous capture."""
+        return self.monitor.legacy_events(since)
 
     def recent_switch_addresses(self, limit=5):
         """Most-recent short addresses seen sending switch commands (for 'learn')."""
-        self._ensure_monitor()
         seen = []
-        for e in reversed(self._monitor):
+        for e in reversed(self.monitor.legacy_events()):
             if e.get("type") in ("RecallMaxLevel", "Off") and e.get("address") is not None:
                 a = e["address"]
                 if a not in seen:
@@ -182,13 +146,20 @@ class DaliConfig:
         return seen
 
     @contextlib.asynccontextmanager
-    async def _guard(self):
+    async def _guard(self, operation="configuration operation", **parameters):
         """Own the bus for one operation: pause the bridge, serialise access."""
         async with self._lock:
             if self._busy is not None:
                 self._busy.set()
+            self.monitor.start_operation(operation, **parameters)
+            outcome = {}
             try:
-                yield
+                yield outcome
+            except BaseException as err:
+                self.monitor.finish_operation(f"{type(err).__name__}: {err}")
+                raise
+            else:
+                self.monitor.finish_operation(outcome.get("error"))
             finally:
                 if self._busy is not None:
                     self._busy.clear()
@@ -198,7 +169,7 @@ class DaliConfig:
         """Scan control gear and return a list of dicts describing each one."""
         await self._ready()
         result = []
-        async with self._guard():
+        async with self._guard("scan_gear"):
             for a in addresses:
                 short = address.Short(a)
                 try:
@@ -255,7 +226,7 @@ class DaliConfig:
         await self._ready()
         short = address.Short(addr)
         groups = []
-        async with self._guard():
+        async with self._guard("read_typed_memory"):
             for group_name, module in _MEMORY_GROUPS:
                 # bank -> [(name, cls)]
                 banks = {}
@@ -350,7 +321,7 @@ class DaliConfig:
         cls_name, arg_kind = self._CONSOLE_COMMANDS[command]
         dest = self._target(kind, addr)
         cls = getattr(gear, cls_name)
-        async with self._guard():
+        async with self._guard("send_command"):
             if command == "dapc":
                 cmd = gear.DAPC(dest, int(arg))
             elif command == "goto_scene":
@@ -366,7 +337,7 @@ class DaliConfig:
             raise RuntimeError("colour module unavailable")
         await self._ready()
         short = address.Short(addr)
-        async with self._guard():
+        async with self._guard("read_colour"):
             status = await self._q(_colour.QueryColourStatus(short))
             feat = await self._q(_colour.QueryColourTypeFeatures(short))
         return {
@@ -389,7 +360,7 @@ class DaliConfig:
             yield _colour.SetTemporaryColourTemperature(short)
             yield _colour.Activate(short)
 
-        async with self._guard():
+        async with self._guard("set_colour_temp"):
             await self.driver.run_sequence(_seq())
         return {"ok": True, "mireds": mireds}
 
@@ -407,7 +378,7 @@ class DaliConfig:
             yield _colour.SetTemporaryRGBDimLevel(short)
             yield _colour.Activate(short)
 
-        async with self._guard():
+        async with self._guard("set_colour_rgb"):
             await self.driver.run_sequence(_seq())
         return {"ok": True, "rgb": [int(r), int(g), int(b)]}
 
@@ -417,7 +388,7 @@ class DaliConfig:
             raise RuntimeError("emergency module unavailable")
         await self._ready()
         short = address.Short(addr)
-        async with self._guard():
+        async with self._guard("read_emergency"):
             out = {"address": addr}
             status = await self._q(_emergency.QueryEmergencyStatus(short))
             out["status"] = self._mem_display(status.value) if status and getattr(status, "raw_value", None) is not None else None
@@ -445,7 +416,7 @@ class DaliConfig:
         }
         if kind not in cmd_map:
             raise ValueError(f"unknown test {kind}")
-        async with self._guard():
+        async with self._guard("emergency_test"):
             await self.driver.send(cmd_map[kind](short))
         return {"ok": True, "test": kind}
 
@@ -473,7 +444,7 @@ class DaliConfig:
             coerced = int(value)
         except (TypeError, ValueError):
             coerced = value
-        async with self._guard():
+        async with self._guard("write_typed"):
             await self.driver.run_sequence(cls.write(short, coerced))
         return {"ok": True, "field": name, "value": coerced}
 
@@ -488,7 +459,7 @@ class DaliConfig:
         """
         await self._ready()
         result = []
-        async with self._guard():
+        async with self._guard("scan_lunatone"):
             for a in addresses:
                 short = address.Short(a)
                 present = await self._q(gear.QueryControlGearPresent(short))
@@ -540,7 +511,7 @@ class DaliConfig:
         """Blink a control gear so it can be located physically."""
         await self._ready()
         short = address.Short(addr)
-        async with self._guard():
+        async with self._guard("identify"):
             original = _val(await self._q(gear.QueryActualLevel(short)))
             for _ in range(count):
                 await self.driver.send(gear.RecallMaxLevel(short))
@@ -553,14 +524,14 @@ class DaliConfig:
 
     async def set_level(self, addr, level):
         await self._ready()
-        async with self._guard():
+        async with self._guard("set_level"):
             await self.driver.send(gear.DAPC(address.Short(addr), int(level)))
         return {"ok": True}
 
     async def _set_via_dtr(self, addr, value, command_cls):
         await self._ready()
         short = address.Short(addr)
-        async with self._guard():
+        async with self._guard("set_via_dtr", command=command_cls.__name__, address=addr):
             await self.driver.send(gear.DTR0(int(value)))
             await self.driver.send(command_cls(short))
         return {"ok": True}
@@ -585,13 +556,13 @@ class DaliConfig:
 
     async def add_to_group(self, addr, group):
         await self._ready()
-        async with self._guard():
+        async with self._guard("add_to_group"):
             await self.driver.send(gear.AddToGroup(address.Short(addr), int(group)))
         return {"ok": True}
 
     async def remove_from_group(self, addr, group):
         await self._ready()
-        async with self._guard():
+        async with self._guard("remove_from_group"):
             await self.driver.send(
                 gear.RemoveFromGroup(address.Short(addr), int(group))
             )
@@ -601,7 +572,7 @@ class DaliConfig:
         await self._ready()
         short = address.Short(addr)
         scenes = {}
-        async with self._guard():
+        async with self._guard("get_scenes"):
             for s in range(16):
                 v = _val(await self._q(gear.QuerySceneLevel(short, s)))
                 if v is not None and str(v).upper() != "MASK":
@@ -611,14 +582,14 @@ class DaliConfig:
     async def set_scene(self, addr, scene, level):
         await self._ready()
         short = address.Short(addr)
-        async with self._guard():
+        async with self._guard("set_scene"):
             await self.driver.send(gear.DTR0(int(level)))
             await self.driver.send(gear.SetScene(short, int(scene)))
         return {"ok": True}
 
     async def clear_scene(self, addr, scene):
         await self._ready()
-        async with self._guard():
+        async with self._guard("clear_scene"):
             await self.driver.send(
                 gear.RemoveFromScene(address.Short(addr), int(scene))
             )
@@ -629,7 +600,7 @@ class DaliConfig:
         await self._ready()
         if not (0 <= int(new) <= 63):
             raise ValueError("new address out of range")
-        async with self._guard():
+        async with self._guard("change_address", old=old, new=new) as outcome:
             # DTR0 = (new << 1) | 1, then SET SHORT ADDRESS (config, sent twice)
             await self.driver.send(gear.DTR0((int(new) << 1) | 1))
             await self.driver.send(gear.SetShortAddress(address.Short(int(old))))
@@ -637,9 +608,9 @@ class DaliConfig:
             present = await self._q(
                 gear.QueryControlGearPresent(address.Short(int(new)))
             )
-        verified = bool(
-            isinstance(present, YesNoResponse) and present.value
-        )
+            verified = bool(isinstance(present, YesNoResponse) and present.value)
+            if not verified:
+                outcome["error"] = "New gear address verification failed"
         return {"ok": True, "verified": verified}
 
     async def commission(self, readdress=False, progress_cb=None):
@@ -655,7 +626,7 @@ class DaliConfig:
             if progress_cb:
                 progress_cb(p)
 
-        async with self._guard():
+        async with self._guard("commission"):
             await self.driver.run_sequence(
                 Commissioning(readdress=readdress), progress=_prog
             )
@@ -674,7 +645,7 @@ class DaliConfig:
             return []
         await self._ready()
         result = []
-        async with self._guard():
+        async with self._guard("scan_devices"):
             for a in addresses:
                 short = address.DeviceShort(a)
                 status = await self._q(device.QueryDeviceStatus(short))
@@ -697,7 +668,7 @@ class DaliConfig:
         if not _HAVE_DEVICE:
             raise RuntimeError("control device support requires python-dali 0.11")
         await self._ready()
-        async with self._guard():
+        async with self._guard("identify_device"):
             await self.driver.send(device.IdentifyDevice(address.DeviceShort(addr)))
         return {"ok": True}
 
@@ -707,7 +678,7 @@ class DaliConfig:
             raise RuntimeError("control device support requires python-dali 0.11")
         await self._ready()
         short = self._device_short(addr)
-        async with self._guard():
+        async with self._guard("read_device"):
             await self._require_device(short)
             n = await self._instance_count(short)
             op = _val(await self._q(device.QueryOperatingMode(short)))
@@ -785,7 +756,7 @@ class DaliConfig:
         short = self._device_short(addr)
         self._boolean(enabled)
         await self._ready()
-        async with self._guard():
+        async with self._guard("set_application_controller"):
             await self._require_device(short)
             caps = _val(await self._q(device.QueryDeviceCapabilities(short)))
             if caps is None or not caps & 1:
@@ -804,7 +775,7 @@ class DaliConfig:
         self._instance_number(instance)
         self._boolean(enabled)
         await self._ready()
-        async with self._guard():
+        async with self._guard("set_instance_enabled"):
             inst = await self._require_instance(short, instance)
             cmd = device.EnableInstance if enabled else device.DisableInstance
             await self.driver.send(cmd(short, inst))
@@ -816,7 +787,7 @@ class DaliConfig:
     async def save_device(self, addr):
         short = self._device_short(addr)
         await self._ready()
-        async with self._guard():
+        async with self._guard("save_device"):
             await self._require_device(short)
             await self.driver.send(device.SavePersistentVariables(short))
             await self._require_device(short)
@@ -828,7 +799,7 @@ class DaliConfig:
         if mapper is None:
             return
         await self._ready()
-        async with self._guard():
+        async with self._guard("refresh_instance_map"):
             mapper.clear()
             for addr in range(64):
                 short = address.DeviceShort(addr)
@@ -850,7 +821,7 @@ class DaliConfig:
         short = self._device_short(old)
         new_short = self._device_short(new)
         try:
-            async with self._guard():
+            async with self._guard("change_device_address"):
                 await self._require_device(short)
                 if old == new:
                     return {"ok": True}
@@ -893,6 +864,7 @@ class DaliConfig:
 
         found = {"n": 0}
         programmed = []
+        failures = []
 
         def _prog(msg, **kw):
             logger.info("Device commissioning: %s", msg)
@@ -963,16 +935,20 @@ class DaliConfig:
                             _prog(f"Programmed device short address {new}")
                         else:
                             _prog(f"Failed to verify device address {new}")
+                            failures.append(f"Failed to verify device address {new}")
                         yield device.Withdraw()
                     else:
                         _prog("No free device addresses left")
+                        failures.append("No free device addresses left")
                         finished = True
                         break
             yield device.Terminate()
 
         try:
-            async with self._guard():
+            async with self._guard("commission_devices", readdress=readdress, dry_run=dry_run) as outcome:
                 await self.driver.run_sequence(_seq())
+                if failures:
+                    outcome["error"] = "; ".join(failures)
         finally:
             await self.refresh_instance_map()
         logger.info(
@@ -1016,7 +992,7 @@ class DaliConfig:
                 out.append(self._resp_byte(r))
             return out
 
-        async with self._guard():
+        async with self._guard("read_memory"):
             data = await self.driver.run_sequence(seq())
         return {"address": addr, "bank": int(bank), "start": int(start), "data": data}
 
@@ -1045,7 +1021,7 @@ class DaliConfig:
                 yield mod.WriteMemoryLocationNoReply(0xFF)
             return written
 
-        async with self._guard():
+        async with self._guard("write_memory"):
             written = await self.driver.run_sequence(seq())
         logger.info(
             "Memory write %s bank %s offset %s = %s (readback %s)",
@@ -1083,7 +1059,7 @@ class DaliConfig:
         short = address.DeviceShort(addr)
         inst = InstanceNumber(int(instance))
         _, qtimers = self._pb_maps()
-        async with self._guard():
+        async with self._guard("read_pushbutton"):
             itype = _val(await self._q(device.QueryInstanceType(short, inst)))
             timers = {}
             for name, cmd in qtimers.items():
@@ -1117,7 +1093,7 @@ class DaliConfig:
             raise ValueError(f"unknown timer {which}")
         short = address.DeviceShort(addr)
         inst = InstanceNumber(int(instance))
-        async with self._guard():
+        async with self._guard("set_pushbutton_timer"):
             await self.driver.send(device.DTR0(int(value) & 0xFF))
             await self.driver.send(setters[which](short, inst))
         return {"ok": True}
@@ -1130,7 +1106,7 @@ class DaliConfig:
         short = address.DeviceShort(addr)
         inst = InstanceNumber(int(instance))
         filt = pb.InstanceEventFilter(int(mask) & 0xFF)
-        async with self._guard():
+        async with self._guard("set_pushbutton_events"):
             result = await self.driver.run_sequence(
                 devseq.SetEventFilters(device=short, instance=inst, filter_value=filt)
             )
@@ -1146,7 +1122,7 @@ class DaliConfig:
             raise ValueError("scheme must be an integer")
         scheme = EventScheme(scheme)
         await self._ready()
-        async with self._guard():
+        async with self._guard("set_instance_scheme"):
             inst = await self._require_instance(short, instance)
             result = await self.driver.run_sequence(
                 devseq.SetEventSchemes(

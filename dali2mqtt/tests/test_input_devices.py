@@ -248,9 +248,12 @@ async def test_mapper_rebuild_startup_address_change_and_stale_removal():
 
 
 def test_tridonic_receives_shared_mapper():
-    with patch("dali.driver.hid.tridonic") as factory:
-        bridge.build_driver({"dali_driver": "tridonic", "dali_device": "test"}, None)
-    assert isinstance(factory.call_args.kwargs["dev_inst_map"], DeviceInstanceTypeMapper)
+    from app.monitored_tridonic import MonitoredTridonic
+
+    driver = bridge.build_driver({"dali_driver": "tridonic", "dali_device": "test"}, None)
+    assert isinstance(driver, MonitoredTridonic)
+    assert isinstance(driver.dev_inst_map, DeviceInstanceTypeMapper)
+    assert driver._bus_monitor.capabilities["raw_reports"] is True
 
 
 async def test_startup_populates_map_before_lamps(monkeypatch):
