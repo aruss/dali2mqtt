@@ -9,13 +9,16 @@ from .consts import *
 
 from .devicesnamesconfig import DevicesNamesConfig
 from .functions import normalize
+from .dali_config import DaliConfig
 
 logging.basicConfig(format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
 
+COLOUR_OPERATION_TIMEOUT = 5
+
 
 class Lamp:
-    def __init__(self, driver, mqtt, dali_lamp):
+    def __init__(self, driver, mqtt, dali_lamp, busy=None):
         self.config = Config()
         logger.setLevel(ALL_SUPPORTED_LOG_LEVELS[self.config[CONF_LOG_LEVEL]])
 
@@ -29,6 +32,8 @@ class Lamp:
         self.device_name = f"lamp_{self.address}"
 
         self.current_scene = None
+        self.colour_config = DaliConfig(driver, busy=busy)
+        self.colour_capabilities = {}
 
 
     async def read_current_state(self):
@@ -49,7 +54,14 @@ class Lamp:
 #(await self.driver.send(gear.QueryMaxLevel(self.dali_lamp))).value
 
         await self._getLevelDALI()
+        try:
+            self.colour_capabilities = await asyncio.wait_for(
+                self.colour_config.colour_capabilities(self.address), COLOUR_OPERATION_TIMEOUT
+            )
+        except Exception as err:
+            logger.warning("DT8 capabilities unavailable for A%s: %s", self.address, err)
         self._register_discovery()
+        await self.pollColour()
         self.setSceneToNoneMQTT()
 
         self.mqtt.publish(
@@ -122,6 +134,21 @@ class Lamp:
             },
         }
         
+        caps = self.colour_capabilities
+        if caps.get("color_temp"):
+            json_config.update(
+                color_temp_command_topic=self.colour_topic("color_temp", "set"),
+                color_temp_state_topic=self.colour_topic("color_temp", "status"),
+                min_mireds=caps["min_mireds"], max_mireds=caps["max_mireds"],
+            )
+        if caps.get("rgb"):
+            json_config.update(
+                rgb_command_topic=self.colour_topic("rgb", "set"),
+                rgb_state_topic=self.colour_topic("rgb", "status"),
+            )
+        if caps.get("color_temp") or caps.get("rgb"):
+            json_config["color_mode_state_topic"] = self.colour_topic("color_mode", "status")
+
         self.mqtt.publish(
             HA_DISCOVERY_PREFIX_LIGHT.format(self.config[CONF_HA_DISCOVERY_PREFIX], self.config[CONF_MQTT_BASE_TOPIC], self.device_name),
             json.dumps(json_config),
@@ -163,12 +190,12 @@ class Lamp:
         if self.level == level:
             return
         old = self.level
+        if dali:
+            await self._sendLevelDALI(level)
         self.level = level
-
         if dali:
             for _x in self.groups:
                 _x.recalc_level()
-            await self._sendLevelDALI(level)
 
         self._sendLevelMQTT(level, old)
 
@@ -223,17 +250,63 @@ class Lamp:
                 MQTT_PAYLOAD_ON if self.level > 0 else MQTT_PAYLOAD_OFF,
                 retain=True,
             )
+        await self.pollColour()
+
+    def colour_topic(self, mode, suffix):
+        return f"{self.config[CONF_MQTT_BASE_TOPIC]}/{self.device_name}/{mode}/{suffix}"
+
+    async def pollColour(self):
+        if not (self.colour_capabilities.get("color_temp") or self.colour_capabilities.get("rgb")):
+            return
+        try:
+            state = await asyncio.wait_for(
+                self.colour_config.colour_state(self.address, self.colour_capabilities),
+                COLOUR_OPERATION_TIMEOUT,
+            )
+        except Exception as err:
+            logger.warning("DT8 state unavailable for A%s: %s", self.address, err)
+            return
+        for mode, value in state.items():
+            if mode == "rgb":
+                value = ",".join(str(v) for v in value)
+            self.mqtt.publish(self.colour_topic(mode, "status"), value, retain=True)
+
+    async def setColour(self, mode, payload):
+        if not self.colour_capabilities.get(mode):
+            raise ValueError(f"A{self.address} does not support {mode}")
+        if mode == "color_temp":
+            if not payload.isascii() or not payload.isdecimal():
+                raise ValueError("Temperature must be integer mireds")
+            value = int(payload)
+            caps = self.colour_capabilities
+            if not caps["min_mireds"] <= value <= caps["max_mireds"]:
+                raise ValueError("Temperature outside controller limits")
+            await asyncio.wait_for(
+                self.colour_config.set_colour_temp(self.address, value), COLOUR_OPERATION_TIMEOUT
+            )
+        elif mode == "rgb":
+            parts = payload.split(",")
+            if len(parts) != 3 or any(not v.strip().isascii() or not v.strip().isdecimal() for v in parts):
+                raise ValueError("RGB must contain three integers")
+            values = [int(v) for v in parts]
+            if any(v > 255 for v in values):
+                raise ValueError("RGB outside 0-255")
+            await asyncio.wait_for(
+                self.colour_config.set_colour_rgb(self.address, *(round(v * 254 / 255) for v in values)),
+                COLOUR_OPERATION_TIMEOUT,
+            )
+        await self.pollColour()
 
     async def _sendLevelDALI(self, level):
         orig_level = level
-        level = normalize(level, 0, 255, self.min_levels, 254)
+        level = normalize(level, 1, 255, self.min_levels, 254) if level else 0
 #        level = 254
         if orig_level == 0 or orig_level =='OFF':
 #            await self.driver.send(gear.Off(self.dali_lamp))
             await self.driver.send(gear.DAPC(self.dali_lamp, 0))
         else:
             await self.driver.send(gear.DAPC(self.dali_lamp, level))
-        logger.info(f"Set {self.friendly_name} brightness level to {self.level} ({level})")
+        logger.info(f"Set {self.friendly_name} brightness level to {orig_level} ({level})")
 
     async def _sendSceneDALI(self, scene):
         await self.driver.send(gear.GoToScene(self.dali_lamp, scene))
@@ -243,8 +316,10 @@ class Lamp:
         level = (await self.driver.send(gear.QueryActualLevel(self.dali_lamp))).value
         if level == 0:
             self.level = 0
+        elif self.min_levels == 254:
+            self.level = 255
         else:
-            self.level = normalize(level, self.min_levels, 254, 0, 255)
+            self.level = normalize(max(level, self.min_levels), self.min_levels, 254, 1, 255)
         logger.debug(f"Get {self.friendly_name} brightness level {self.level} ({level})")
 
     async def flash(self, count, speed):

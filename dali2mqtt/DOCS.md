@@ -21,7 +21,7 @@ For Jung 1745 DSTE input controls, see the [Jung setup guide and HA blueprint](J
 
 1. In Home Assistant go to **Settings → Add-ons → Add-on Store**.
 2. Add `https://github.com/aruss/dali2mqtt` (**⋮ → Repositories**),
-   then install **DALI2MQTT 1.18.1** from **aruss add-ons** (amd64 hosts only).
+   then install **DALI2MQTT 1.19.0** from **aruss add-ons** (amd64 hosts only).
    This creates a separate repository entry; existing upstream installations are
    not automatically replaced or migrated.
 3. Make sure you have an **MQTT broker** (e.g. the *Mosquitto broker* add-on)
@@ -91,6 +91,46 @@ Brightness uses the raw DALI range internally; Home Assistant sees a normal
 0–255 light. Turning a light off sends `DAPC 0`.
 
 ---
+
+### DT8 temperature and RGB lights
+
+Individual lamps expose temperature controls when their DT8 features report
+Tc support and valid temperature limits, and RGB controls when at least three
+RGBWAF channels are reported. DT8 alone does not imply both capabilities.
+Groups keep their existing brightness and scene controls.
+
+Existing discovery topics and unique IDs are preserved. Restarting the add-on,
+reinitializing lamps, or a Home Assistant birth message republishes discovery
+in place; deleting entities is not required. The displayed application version
+`1.0.0` is a legacy constant; check the installed add-on version instead.
+
+With the default MQTT base topic, lamp A0 accepts these **plain-text** commands:
+
+| Topic | Example payload | Meaning |
+|---|---|---|
+| `dali2mqtt/lamp_0/brightness/set` | `128` | Brightness 0-255; 0 is OFF |
+| `dali2mqtt/lamp_0/color_temp/set` | `300` | Temperature in mireds, approximately 3333 K |
+| `dali2mqtt/lamp_0/rgb/set` | `255,128,0` | RGB channels 0-255 |
+
+Use the actual controller's reported temperature limits. Unsupported or invalid
+color commands are rejected. MQTT RGB values are converted to DALI 0-254 so
+255 is never accidentally sent as a DALI MASK value.
+
+State is retained under the corresponding `brightness/status`,
+`color_temp/status`, and `rgb/status` topics. `color_mode/status` reports
+`color_temp` or `rgb`. Color readback publishes the active mode's actual values
+after initialization, color commands, **Poll lamps**, and queued bus updates.
+Changes made through Cockpit can be checked with **Poll lamps**. A read failure
+logs the lamp address and does not invent a successful state update. If
+temperature limits cannot be read, temperature discovery is withheld while
+brightness and independently detected RGB remain available.
+
+If Home Assistant shows only ON/OFF, first open the light's full controls and
+check its attributes. Capture the retained `homeassistant/light/#` configuration
+for the affected lamp and any MQTT validation errors. Compare its brightness
+topics with those above, check that the installed add-on comes from this fork,
+and test a plain `128` brightness command while observing its state topic.
+Do not send JSON to these default-schema command topics.
 
 ## 4. The DALI Config web UI (Ingress)
 

@@ -332,6 +332,86 @@ class DaliConfig:
         return {"ok": True, "command": str(cmd), "response": str(resp) if resp is not None else None}
 
     # ----------------------------------------------------- colour control (DT8)
+    @staticmethod
+    def _colour_byte(response):
+        raw = getattr(response, "raw_value", None)
+        if raw is None or getattr(raw, "error", False):
+            raise ValueError("Missing or invalid DT8 response")
+        return raw.as_integer
+
+    def _colour_value(self, short, selector, word=False):
+        """Run inside a driver sequence so DTR selection/readback stays atomic."""
+        yield gear.DTR0(int(selector))
+        high = self._colour_byte((yield _colour.QueryColourValue(short)))
+        if word:
+            low = self._colour_byte((yield gear.QueryContentDTR0(short)))
+            value = (high << 8) | low
+            if value in (0, 65535):
+                raise ValueError("Unavailable DT8 temperature")
+            return value
+        if high == 255:
+            raise ValueError("Unavailable DT8 channel level")
+        return high
+
+    async def colour_capabilities(self, addr):
+        """Discover DT8 features, including gear supporting multiple types."""
+        if _colour is None:
+            return {}
+        await self._ready()
+        short = address.Short(addr)
+
+        def sequence():
+            device_type = self._colour_byte((yield gear.QueryDeviceType(short)))
+            types = [device_type]
+            if device_type == 255:
+                types = []
+                for _ in range(64):
+                    value = self._colour_byte((yield gear.QueryNextDeviceType(short)))
+                    if value == 254:
+                        break
+                    if value in types:
+                        raise ValueError("Repeated device type")
+                    types.append(value)
+                else:
+                    raise ValueError("Unterminated device type list")
+            if 8 not in types:
+                return {}
+            features = self._colour_byte((yield _colour.QueryColourTypeFeatures(short)))
+            caps = {"rgb": ((features >> 5) & 7) >= 3}
+            if features & 2:
+                try:
+                    coolest = yield from self._colour_value(short, 128, word=True)
+                    warmest = yield from self._colour_value(short, 130, word=True)
+                    if coolest > warmest:
+                        raise ValueError("Reversed temperature limits")
+                    caps.update(color_temp=True, min_mireds=coolest, max_mireds=warmest)
+                except ValueError as err:
+                    logger.warning("DT8 A%s temperature limits unavailable: %s", addr, err)
+            return caps
+
+        async with self._guard("colour_capabilities", address=addr):
+            return await self.driver.run_sequence(sequence())
+
+    async def colour_state(self, addr, capabilities):
+        await self._ready()
+        short = address.Short(addr)
+
+        def sequence():
+            yield gear.QueryActualLevel(short)  # Refresh the gear's reported colour.
+            status = self._colour_byte((yield _colour.QueryColourStatus(short)))
+            if status & 32 and capabilities.get("color_temp"):
+                value = yield from self._colour_value(short, 2, word=True)
+                return {"color_mode": "color_temp", "color_temp": value}
+            if status & 128 and capabilities.get("rgb"):
+                channels = []
+                for selector in (9, 10, 11):
+                    channels.append((yield from self._colour_value(short, selector)))
+                return {"color_mode": "rgb", "rgb": [round(v * 255 / 254) for v in channels]}
+            return {}
+
+        async with self._guard("colour_state", address=addr):
+            return await self.driver.run_sequence(sequence())
+
     async def read_colour(self, addr):
         if _colour is None:
             raise RuntimeError("colour module unavailable")

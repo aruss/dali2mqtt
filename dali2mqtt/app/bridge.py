@@ -332,7 +332,7 @@ async def initialize_lamps(data_object, client):
     for lamp in lamps:
         try:
             _address = address.Short(lamp)
-            lamp = Lamp(driver_object, client, _address)
+            lamp = Lamp(driver_object, client, _address, busy=config_busy)
             await lamp.read_current_state()
             data_object["all_lamps"][lamp.address] = lamp
         except Exception as err:
@@ -442,6 +442,18 @@ async def on_message_brightness_cmd(mqtt_client, data_object, msg):
         logger.error("Invalid brightness payload for %s: %s", light, level)
 
 
+async def on_message_colour_cmd(mqtt_client, data_object, msg):
+    """Handle default-schema DT8 commands for individual lamps."""
+    try:
+        device, mode, _ = msg.topic.rsplit("/", 3)[-3:]
+        light = get_light_object(data_object, device)
+        if not isinstance(light, Lamp):
+            return
+        await light.setColour(mode, msg.payload.decode("utf-8"))
+    except Exception as err:
+        logger.warning("Failed colour command on %s: %s", msg.topic, err)
+
+
 async def on_message_scene_cmd(mqtt_client, data_object, msg):
     """Callback on MQTT scene command message."""
     logger.debug("Scene command on %s: %s", msg.topic, msg.payload)
@@ -511,6 +523,8 @@ async def on_connect(client, data_object, flags, result):  # pylint: disable=W06
             (MQTT_COMMAND_TOPIC.format(config[CONF_MQTT_BASE_TOPIC], "+"), 0),
             (MQTT_FLASH_TOPIC.format(config[CONF_MQTT_BASE_TOPIC], "+"), 0),
             (MQTT_BRIGHTNESS_COMMAND_TOPIC.format(config[CONF_MQTT_BASE_TOPIC], "+"), 0),
+            (MQTT_COLOR_TEMP_COMMAND_TOPIC.format(config[CONF_MQTT_BASE_TOPIC], "+"), 0),
+            (MQTT_RGB_COMMAND_TOPIC.format(config[CONF_MQTT_BASE_TOPIC], "+"), 0),
             (MQTT_SCENE_COMMAND_TOPIC.format(config[CONF_MQTT_BASE_TOPIC], "+"), 0),
             (MQTT_SCAN_LAMPS_COMMAND_TOPIC.format(config[CONF_MQTT_BASE_TOPIC]), 0),
             (MQTT_POLL_LAMPS_COMMAND_TOPIC.format(config[CONF_MQTT_BASE_TOPIC]), 0),
@@ -631,6 +645,8 @@ async def create_mqtt_client(driver_object, mirror):
     for topic, callback in [
         (MQTT_COMMAND_TOPIC.format(config[CONF_MQTT_BASE_TOPIC], "+"), on_message_cmd),
         (MQTT_FLASH_TOPIC.format(config[CONF_MQTT_BASE_TOPIC], "+"), on_message_flash),
+        (MQTT_COLOR_TEMP_COMMAND_TOPIC.format(config[CONF_MQTT_BASE_TOPIC], "+"), on_message_colour_cmd),
+        (MQTT_RGB_COMMAND_TOPIC.format(config[CONF_MQTT_BASE_TOPIC], "+"), on_message_colour_cmd),
         (
             MQTT_BRIGHTNESS_COMMAND_TOPIC.format(config[CONF_MQTT_BASE_TOPIC], "+"),
             on_message_brightness_cmd,

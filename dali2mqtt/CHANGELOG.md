@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.19.0
+
+- Detect DT8 capabilities, including multi-type gear, and add temperature and
+  RGB controls to existing MQTT light entities where supported.
+- Publish actual color state and active mode on startup, commands, polling,
+  and bus-triggered refresh; preserve existing discovery IDs and MQTT topics.
+- Validate temperature limits and RGB payloads; scale MQTT RGB 0-255 to DALI
+  0-254 so full intensity never becomes a MASK command.
+- Keep physical-minimum brightness distinct from OFF and allow failed
+  brightness writes to be retried without publishing false success state.
+- Bound color operations so stalled queries do not indefinitely delay
+  brightness initialization or polling.
+- Prepare this release locally. Publication and live hardware acceptance
+  remain separate actions.
+
 ## 1.18.1
 
 - Capture Tridonic USB reports continuously from startup in a shared, bounded
