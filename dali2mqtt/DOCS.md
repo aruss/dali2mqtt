@@ -21,7 +21,7 @@ For Jung 1745 DSTE input controls, see the [Jung setup guide and HA blueprint](J
 
 1. In Home Assistant go to **Settings → Add-ons → Add-on Store**.
 2. Add `https://github.com/aruss/dali2mqtt` (**⋮ → Repositories**),
-   then install **DALI2MQTT 1.19.0** from **aruss add-ons** (amd64 hosts only).
+   then install **DALI2MQTT 1.19.1** from **aruss add-ons** (amd64 hosts only).
    This creates a separate repository entry; existing upstream installations are
    not automatically replaced or migrated.
 3. Make sure you have an **MQTT broker** (e.g. the *Mosquitto broker* add-on)
@@ -124,6 +124,12 @@ Changes made through Cockpit can be checked with **Poll lamps**. A read failure
 logs the lamp address and does not invent a successful state update. If
 temperature limits cannot be read, temperature discovery is withheld while
 brightness and independently detected RGB remain available.
+
+Capability detection is cached after a successful query and refreshed when
+lamps are reinitialized. Query notifications do not trigger another lamp read,
+and bursts of changes are combined into one pending refresh per lamp. Version
+1.19.1 also reconnects the Tridonic interface after a stalled USB response so
+one request cannot hold the shared bus lock indefinitely.
 
 If Home Assistant shows only ON/OFF, first open the light's full controls and
 check its attributes. Capture the retained `homeassistant/light/#` configuration

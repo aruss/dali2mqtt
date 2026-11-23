@@ -451,7 +451,7 @@ async def on_message_colour_cmd(mqtt_client, data_object, msg):
             return
         await light.setColour(mode, msg.payload.decode("utf-8"))
     except Exception as err:
-        logger.warning("Failed colour command on %s: %s", msg.topic, err)
+        logger.warning("Failed colour command on %s: %s: %s", msg.topic, type(err).__name__, err)
 
 
 async def on_message_scene_cmd(mqtt_client, data_object, msg):
@@ -606,6 +606,8 @@ async def process_queue(client, data_object):
         logger.debug("Got item from update queue: %s", item)
         # Give the lamp time to settle on its final state before reading it back.
         await asyncio.sleep(2)
+        # Allow one follow-up if a real change arrives during this read.
+        data_object.setdefault("pending_lamp_updates", set()).discard(item)
         if config_busy.is_set():
             # A config operation owns the bus; drop this queued read-back.
             continue
@@ -680,6 +682,16 @@ async def create_mqtt_client(driver_object, mirror):
     )
 
 
+def queue_lamp_update(data_object, lamp_address):
+    """Coalesce a burst of bus changes to one pending refresh per lamp."""
+    if lamp_address not in data_object["all_lamps"]:
+        return
+    pending = data_object.setdefault("pending_lamp_updates", set())
+    if lamp_address not in pending:
+        pending.add(lamp_address)
+        data_object["queue"].put_nowait(lamp_address)
+
+
 def print_command_and_response(data_object, dev, command, response, config_command_error):
     """Sync callback to process messages coming from the DALI bus."""
     if config_busy.is_set():
@@ -695,6 +707,10 @@ def print_command_and_response(data_object, dev, command, response, config_comma
         if isinstance(command, _Event):
             publish_bus_event(command, response)
             return
+        # Driver callbacks may arrive after the configuration guard clears.
+        # Queries never change lamp state, regardless of their device type.
+        if command.is_query:
+            return
         if not hasattr(command, "destination"):
             return
 
@@ -705,7 +721,7 @@ def print_command_and_response(data_object, dev, command, response, config_comma
         if isinstance(command.destination, (address.Group, address.Broadcast)):
             # Broadcast/group command: re-read every known lamp.
             for addr in data_object["all_lamps"]:
-                data_object["queue"].put_nowait(addr)
+                queue_lamp_update(data_object, addr)
             # Mirror a whole-house broadcast all-off / all-on (e.g. a bedside
             # "everything off" switch) onto the mapped Home Assistant entities.
             # is_lamp_addr=True keeps this to RecallMax/Off only (no DAPC dimming).
@@ -725,20 +741,7 @@ def print_command_and_response(data_object, dev, command, response, config_comma
             return
 
         addr = command.destination.address
-        if not isinstance(
-            command,
-            (
-                gear.QuerySceneLevel,
-                gear.QueryActualLevel,
-                gear.QueryMaxLevel,
-                gear.QueryMinLevel,
-                gear.QueryPhysicalMinimum,
-                gear.QueryControlGearPresent,
-                gear.QueryGroupsZeroToSeven,
-                gear.QueryGroupsEightToFifteen,
-            ),
-        ):
-            data_object["queue"].put_nowait(addr)
+        queue_lamp_update(data_object, addr)
 
         # A physical switch mapped to this address: RecallMaxLevel -> turn the
         # HA entity on (brightness-capable lights follow the level), Off -> off.

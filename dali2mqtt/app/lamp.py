@@ -34,6 +34,7 @@ class Lamp:
         self.current_scene = None
         self.colour_config = DaliConfig(driver, busy=busy)
         self.colour_capabilities = {}
+        self.colour_capabilities_loaded = False
 
 
     async def read_current_state(self):
@@ -54,12 +55,14 @@ class Lamp:
 #(await self.driver.send(gear.QueryMaxLevel(self.dali_lamp))).value
 
         await self._getLevelDALI()
-        try:
-            self.colour_capabilities = await asyncio.wait_for(
-                self.colour_config.colour_capabilities(self.address), COLOUR_OPERATION_TIMEOUT
-            )
-        except Exception as err:
-            logger.warning("DT8 capabilities unavailable for A%s: %s", self.address, err)
+        if not self.colour_capabilities_loaded:
+            try:
+                self.colour_capabilities = await asyncio.wait_for(
+                    self.colour_config.colour_capabilities(self.address), COLOUR_OPERATION_TIMEOUT
+                )
+                self.colour_capabilities_loaded = True
+            except Exception as err:
+                logger.warning("DT8 capabilities unavailable for A%s: %s: %s", self.address, type(err).__name__, err)
         self._register_discovery()
         await self.pollColour()
         self.setSceneToNoneMQTT()
@@ -264,7 +267,7 @@ class Lamp:
                 COLOUR_OPERATION_TIMEOUT,
             )
         except Exception as err:
-            logger.warning("DT8 state unavailable for A%s: %s", self.address, err)
+            logger.warning("DT8 state unavailable for A%s: %s: %s", self.address, type(err).__name__, err)
             return
         for mode, value in state.items():
             if mode == "rgb":

@@ -284,3 +284,12 @@ async def test_single_level_controller_reports_full_brightness(lamp):
         "QueryActualLevel", "QueryPhysicalMinimum", "QueryMinLevel") else responder(cmd)
     await lamp.read_current_state()
     assert lamp.level == 255
+
+
+async def test_capabilities_cached_until_reinitialization(lamp):
+    await lamp.read_current_state()
+    first = lamp.driver.sent_types().count("QueryColourTypeFeatures")
+    await lamp.read_current_state()
+    assert first == 1
+    assert lamp.driver.sent_types().count("QueryColourTypeFeatures") == first
+    assert lamp.driver.sent_types().count("QueryColourStatus") == 2

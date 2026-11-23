@@ -1,12 +1,19 @@
 # Bus monitor
 
-The 1.18.1 monitor captures interface reports continuously from startup and
-shows an eight-column table with expandable record details. Raw reports,
+The monitor introduced in 1.18.1 captures interface reports continuously from
+startup and shows an eight-column table with expandable record details. Raw reports,
 decoded transaction summaries, and application diagnostics remain distinct.
 The legacy `/api/monitor` endpoint retains its decoded-event contract for
 existing consumers and switch learning.
 
 ## Capture lifetime and retention
+
+Since 1.19.1, the Tridonic integration bounds USB response waits to two seconds.
+A silent response triggers a reconnect and clears outstanding sequences; a
+cancelled send with an outstanding request also reconnects. These are transport
+failures, distinct from a valid DALI "no response" report. Normal sends and raw
+report capture still use the pinned library's processing. Query notifications
+remain visible here but do not trigger lamp refreshes.
 
 The bridge attaches one monitor to its driver before connecting. Configuration
 helpers reuse that monitor instead of creating separate callback subscriptions.

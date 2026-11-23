@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.19.1
+
+- Stop delayed DT8 and other query notifications from triggering a continuous
+  lamp-read feedback loop. Coalesce bursts of bus changes per lamp, retaining
+  a follow-up read when another change arrives during a refresh.
+- Cache successful capability detection until lamp reinitialization instead
+  of rediscovering capabilities on every state refresh.
+- Bound Tridonic USB response waits, reconnect on a stalled response, and
+  clear outstanding sequences on cancellation so one silent request cannot
+  indefinitely hold the bus lock.
+- Include exception types in color warnings so timeouts are visible.
+
 ## 1.19.0
 
 - Detect DT8 capabilities, including multi-type gear, and add temperature and
