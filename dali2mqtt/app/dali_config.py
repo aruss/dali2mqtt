@@ -726,19 +726,31 @@ class DaliConfig:
         await self._ready()
         result = []
         async with self._guard("scan_devices"):
+            async def query_value(command, addr):
+                # Send outside decoding: transport failures must fail the scan.
+                response = await self.driver.send(command)
+                raw = getattr(response, "raw_value", None)
+                if raw is None:
+                    return None
+                value = None if raw.error else _val(response)
+                if value is None or not 0 <= value <= 255:
+                    logger.warning("Rejected invalid control-device reply D%d %s",
+                                   addr, type(command).__name__)
+                    return None
+                return value
+
             for a in addresses:
                 short = address.DeviceShort(a)
-                status = await self._q(device.QueryDeviceStatus(short))
-                # No backward frame -> device absent (response.raw_value is None).
-                if status is None or getattr(status, "raw_value", None) is None:
+                status = await query_value(device.QueryDeviceStatus(short), a)
+                if status is None:
                     continue
                 info = {"address": a}
-                info["status"] = _val(status)
-                info["instances"] = _val(
-                    await self._q(device.QueryNumberOfInstances(short))
+                info["status"] = status
+                info["instances"] = await query_value(
+                    device.QueryNumberOfInstances(short), a
                 )
-                info["operating_mode"] = _val(
-                    await self._q(device.QueryOperatingMode(short))
+                info["operating_mode"] = await query_value(
+                    device.QueryOperatingMode(short), a
                 )
                 result.append(info)
         logger.info("Config scan found %d control devices", len(result))

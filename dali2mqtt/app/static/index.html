@@ -156,9 +156,14 @@ async function scanDevices(){
     const d = await api("api/scan_devices");
     if(!d.supported){ toast("Control devices need python-dali 0.11"); return; }
     DEVICES = d.devices||[];
+    if(SELDEV!==null && !deviceOf(SELDEV)){
+      const missingAddress = SELDEV;
+      SELDEV = null;
+      $("#detail").textContent = `D${missingAddress} was not found in the latest scan. Saved MQTT profile retained.`;
+    }
     renderList();
     toast("Found "+DEVICES.length+" control devices");
-  }catch(e){ toast("Device scan failed: "+e.message); }
+  }catch(e){ toast("Device scan failed: "+e.message+" Previous results retained."); }
   finally{ b.disabled=false; b.textContent="Scan devices"; }
 }
 

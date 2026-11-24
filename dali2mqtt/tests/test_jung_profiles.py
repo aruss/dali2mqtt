@@ -7,10 +7,11 @@ from types import SimpleNamespace
 from dali.command import Command
 from dali.device.helpers import DeviceInstanceTypeMapper
 from dali.frame import ForwardFrame
+from dali.frame import BackwardFrame
 
 from app import bridge
 from app.jung import ABSOLUTE, ACTIONS, GESTURES, JungProfiles
-from conftest import FakeDriver
+from conftest import FakeDriver, dest_addr
 from test_input_devices import DeviceBus
 from test_webserver import _client
 
@@ -19,8 +20,10 @@ class Broker:
     def __init__(self):
         self.retained = {}
         self.messages = []
+        self.publications = []
 
     def publish(self, topic, payload, qos=0, retain=False):
+        self.publications.append((topic, payload, retain))
         if retain:
             if payload:
                 self.retained[topic] = json.loads(payload)
@@ -28,6 +31,36 @@ class Broker:
                 self.retained.pop(topic, None)
         else:
             self.messages.append((topic, payload))
+
+
+async def test_scan_absence_preserves_profile_discovery_and_event_topic(tmp_path):
+    profiles = JungProfiles(tmp_path, "home/bus", "ha")
+    broker = Broker()
+    profiles.refresh(broker)
+    driver = FakeDriver()
+    client = await _client(driver, profiles=profiles)
+    try:
+        response = await client.post("/api/device/0/profile", json={"profile": ABSOLUTE})
+        assert response.status == 200
+        saved = profiles.path.read_bytes()
+        discovery = broker.retained.copy()
+        broker.publications.clear()
+        for present in (True, False, True):
+            driver._responder = lambda cmd: cmd.response(BackwardFrame(0)) if present and dest_addr(cmd) == 0 else None
+            response = await client.get("/api/scan_devices")
+            assert response.status == 200
+            devices = (await response.json())["devices"]
+            assert [d["address"] for d in devices] == ([0] if present else [])
+            if present:
+                assert devices[0]["profile"] == ABSOLUTE
+            assert profiles.path.read_bytes() == saved
+            assert broker.retained == discovery
+            assert not broker.publications
+        profiles.handle_event({"source_address": 0, "instance_number": 0,
+                               "instance_type": 1, "event_info": 1})
+        assert broker.messages == [("home/bus/control_device_0/action", '{"event_type": "press"}')]
+    finally:
+        await client.close()
 
 
 async def test_profile_assignment_without_bus_writes(tmp_path):
