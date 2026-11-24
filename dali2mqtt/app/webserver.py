@@ -249,18 +249,40 @@ class DaliWebServer:
             return _json(await self.cfg.clear_scene(addr, scene))
         return _json(await self.cfg.set_scene(addr, scene, int(body["level"])))
 
+    async def _refresh_outcome(self):
+        from .bridge import BridgeNotReady
+
+        if self.reinit is None:
+            raise BridgeNotReady("bridge not connected yet")
+        result = await self.reinit()
+        if result is None:
+            raise BridgeNotReady("bridge not connected yet")
+        return result
+
     async def api_commission(self, request):
         body = await self._body(request)
-        readdress = bool(body.get("readdress", False))
-        res = await self.cfg.commission(readdress=readdress)
-        if self.reinit:
-            await self.reinit()
+        try:
+            res = await self.cfg.commission(readdress=bool(body.get("readdress", False)))
+        except Exception as err:
+            logger.exception("gear commissioning failed")
+            return _json({"error": str(err)}, 500)
+        try:
+            res["refresh"] = await self._refresh_outcome()
+        except Exception as err:
+            logger.exception("post-commission refresh failed")
+            res["refresh"] = {"ok": False, "error": str(err)}
         return _json(res)
 
     async def api_reinit(self, request):
-        if self.reinit:
-            await self.reinit()
-        return _json({"ok": True})
+        from .bridge import BridgeNotReady
+
+        try:
+            return _json(await self._refresh_outcome())
+        except BridgeNotReady as err:
+            return _json({"error": str(err)}, 503)
+        except Exception as err:
+            logger.exception("entity refresh failed")
+            return _json({"error": str(err)}, 500)
 
     # ------------------------------------------------- control device handlers
     async def api_scan_devices(self, request):

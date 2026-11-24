@@ -10,7 +10,7 @@ installable Home Assistant add-on. Fork of
 1. Home Assistant → **Settings → Add-ons → Add-on Store**.
 2. **⋮ → Repositories** → add this repository URL:
    `https://github.com/aruss/dali2mqtt`
-3. Install **DALI2MQTT 1.20.1** from **aruss add-ons**, set the options, start it.
+3. Install **DALI2MQTT 1.20.2** from **aruss add-ons**, set the options, start it.
 
 This fork supports **amd64 (x86-64)** Home Assistant hosts only. Adding its URL
 creates a separate repository entry from the upstream add-on; an existing upstream

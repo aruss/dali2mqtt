@@ -6,7 +6,6 @@ import json
 import logging
 import selectors
 import signal
-import traceback
 from pprint import pformat
 from pathlib import Path
 
@@ -25,7 +24,7 @@ from .consts import *
 from .devicesnamesconfig import DevicesNamesConfig
 from .group import Group
 from .ha_mirror import HAEntityMirror
-from .lamp import Lamp
+from .lamp import Lamp, LampReadError, validate_reply
 from .jung import JungProfiles
 from .bus_monitor import get_monitor
 
@@ -47,15 +46,19 @@ def refresh_profiles(client):
         profiles.refresh(client)
 
 
+class BridgeNotReady(RuntimeError):
+    pass
+
+
 async def reinit_discovery():
     """Re-scan the DALI bus and refresh Home Assistant MQTT discovery."""
     data_object = _runtime.get("data")
     client = _runtime.get("client")
     if data_object is None or client is None:
         logger.warning("Cannot reinit: bridge not connected yet")
-        return
+        raise BridgeNotReady("bridge not connected yet")
     refresh_profiles(client)
-    await initialize_lamps(data_object, client)
+    return await initialize_lamps(data_object, client)
 
 
 def simulate_button(addr):
@@ -281,104 +284,101 @@ async def scan_lamps(driver):
     logger.info("Searching for lamps...")
     config = Config()
     for lamp in range(0, 64):
-        try:
-            logger.debug("Search for lamp %s", lamp)
-            present = await driver.send(
-                gear.QueryControlGearPresent(address.Short(lamp))
-            )
-            if isinstance(present, YesNoResponse) and present.value:
-                lamps.append(lamp)
-                logger.debug("Found lamp at address %d", lamp)
-                if len(lamps) >= config[CONF_DALI_LAMPS]:
-                    logger.warning(
-                        "All %s configured lamps have been found, stopping scan",
-                        config[CONF_DALI_LAMPS],
-                    )
-                    logger.info("Found %d lamps", len(lamps))
-                    return lamps
-        except DALIError as err:
-            logger.warning("%s not present: %s", lamp, err)
+        logger.debug("Search for lamp %s", lamp)
+        present = await driver.send(
+            gear.QueryControlGearPresent(address.Short(lamp))
+        )
+        if isinstance(present, YesNoResponse) and present.value:
+            lamps.append(lamp)
+            logger.debug("Found lamp at address %d", lamp)
+            if len(lamps) >= config[CONF_DALI_LAMPS]:
+                logger.warning(
+                    "All %s configured lamps have been found, stopping scan",
+                    config[CONF_DALI_LAMPS],
+                )
+                logger.info("Found %d lamps", len(lamps))
+                return lamps
 
     logger.info("Found %d lamps", len(lamps))
     return lamps
 
 
 async def scan_groups(dali_driver, lamps):
-    logger.info("Scanning for groups...")
     groups = {}
+    failures = []
     for lamp in lamps:
-        try:
-            logger.debug("Search for groups for lamp %s", lamp)
-            group1 = (
-                await dali_driver.send(gear.QueryGroupsZeroToSeven(address.Short(lamp)))
-            ).value.as_integer
-            group2 = (
-                await dali_driver.send(
-                    gear.QueryGroupsEightToFifteen(address.Short(lamp))
-                )
-            ).value.as_integer
-
-            lamp_groups = []
-            for i in range(8):
-                checkgroup = 1 << i
-                if (group1 & checkgroup) == checkgroup:
-                    groups.setdefault(i, []).append(lamp)
-                    lamp_groups.append(i)
-                if (group2 & checkgroup) != 0:
-                    groups.setdefault(i + 8, []).append(lamp)
-                    lamp_groups.append(i + 8)
-
-            logger.debug("Lamp %d is in groups %s", lamp, lamp_groups)
-        except Exception as err:
-            logger.warning("Can't get groups for lamp %s: %s", lamp, err)
-    logger.info("Finished scanning for groups")
-    return groups
+        masks = []
+        for query in (gear.QueryGroupsZeroToSeven, gear.QueryGroupsEightToFifteen):
+            try:
+                reply = await dali_driver.send(query(address.Short(lamp)))
+                masks.append(validate_reply(reply, lamp, query.__name__, maximum=255, bitmap=True))
+            except LampReadError as err:
+                failures.append(err)
+                break
+        if len(masks) == 2:
+            for group in range(16):
+                if masks[group // 8] & (1 << (group % 8)):
+                    groups.setdefault(group, []).append(lamp)
+    return groups, failures
 
 
 async def initialize_lamps(data_object, client):
-    logger.info("Initializing lamps...")
-    driver_object = data_object["driver"]
-    lamps = await scan_lamps(driver_object)
-    logger.info("Getting lamp parameters:")
-    for lamp in lamps:
-        try:
-            _address = address.Short(lamp)
-            lamp = Lamp(driver_object, client, _address, busy=config_busy)
-            await lamp.read_current_state()
-            data_object["all_lamps"][lamp.address] = lamp
-        except Exception as err:
-            logger.error("While initializing lamp <%s>: %s", lamp, err)
-            logger.debug(traceback.format_exc())
-            raise err
+    from .dali_config import DaliConfig
 
-    groups = await scan_groups(driver_object, lamps)
-    for group, group_lamps in groups.items():
-        try:
-            _address = address.Group(group)
-            _lamps = [data_object["all_lamps"][_x] for _x in group_lamps]
-            group = Group(driver_object, client, _address, _lamps)
-            for _x in group_lamps:
-                data_object["all_lamps"][_x].addGroup(group)
-            data_object["all_groups"][group.address] = group
-        except Exception as err:
-            logger.error("While initializing group <%s>: %s", group, err)
-            logger.debug(traceback.format_exc())
-            raise err
+    driver = data_object["driver"]
+    summary = {"ok": True, "partial": False, "refreshed": [], "failed": []}
+    failures = {}
+    async with DaliConfig(driver, busy=config_busy)._guard("initialize_lamps"):
+        lamps = await scan_lamps(driver)
+        for addr in lamps:
+            lamp = data_object["all_lamps"].get(addr)
+            if lamp is None:
+                lamp = Lamp(driver, client, address.Short(addr), busy=config_busy)
+            try:
+                await lamp.read_current_state(required_only=True)
+            except LampReadError as err:
+                failures[addr] = err
+                summary["failed"].append(err.failure())
+                continue
+            data_object["all_lamps"][addr] = lamp
+            summary["refreshed"].append(addr)
 
-    devices_names_config = DevicesNamesConfig()
-    if devices_names_config.is_devices_file_empty():
-        devices_names_config.save_devices_names_file(
-            list(data_object["all_lamps"].values())
-            + list(data_object["all_groups"].values())
-        )
+        groups, membership_failures = await scan_groups(driver, lamps)
+        # Unknown membership can affect any group. Preserve existing groups and
+        # defer all newly reported groups until membership is complete.
+        for group in sorted(set(groups) | set(data_object["all_groups"])):
+            members = groups.get(group, [])
+            prerequisites = list(membership_failures)
+            prerequisites.extend(failures[a] for a in members if a in failures)
+            if prerequisites:
+                summary["failed"].extend(err.failure("group", group) for err in prerequisites)
+                continue
+            if not members:
+                continue
+            group_lamps = [data_object["all_lamps"][a] for a in members]
+            old = data_object["all_groups"].get(group)
+            new = Group(driver, client, address.Group(group), group_lamps)
+            for lamp in data_object["all_lamps"].values():
+                lamp.groups = [g for g in lamp.groups if g is not old]
+            for lamp in group_lamps:
+                lamp.addGroup(new)
+            data_object["all_groups"][group] = new
+        # Even with no known groups, missing membership means incomplete results.
+        summary["failed"].extend(err.failure() for err in membership_failures)
 
+        # Discovery already owns the configuration guard, including optional DT8.
+        for addr in summary["refreshed"]:
+            await data_object["all_lamps"][addr].publish_current_state(config_owned=True)
+    names = DevicesNamesConfig()
+    if names.is_devices_file_empty():
+        names.save_devices_names_file(list(data_object["all_lamps"].values())
+                                      + list(data_object["all_groups"].values()))
     config = Config()
-    client.publish(
-        MQTT_DALI2MQTT_STATUS.format(config[CONF_MQTT_BASE_TOPIC]),
-        MQTT_AVAILABLE,
-        retain=True,
-    )
-    logger.info("Lamp initialization finished")
+    client.publish(MQTT_DALI2MQTT_STATUS.format(config[CONF_MQTT_BASE_TOPIC]),
+                   MQTT_AVAILABLE, retain=True)
+    summary["partial"] = bool(summary["failed"])
+    logger.info("Lamp initialization result: %s", summary)
+    return summary
 
 
 def get_light_object(data_object, light):
@@ -517,7 +517,10 @@ async def on_message_poll_lamps_cmd(mqtt_client, data_object, msg):
     """Callback on MQTT poll lamps command message."""
     logger.info("Polling lamps")
     for _x in data_object["all_lamps"].values():
-        await _x.pollLevel()
+        try:
+            await _x.pollLevel()
+        except LampReadError:
+            continue
     for _x in data_object["all_groups"].values():
         _x.recalc_level()
     logger.info("Polling lamps finished")
@@ -636,8 +639,8 @@ async def process_queue(client, data_object):
         try:
             if item in data_object["all_lamps"]:
                 await data_object["all_lamps"][item].read_current_state()
-        except Exception as err:
-            logger.error("Failure to update lamp %s: %s", item, err)
+        except LampReadError as err:
+            logger.warning("Failure to update lamp %s: %s", item, err)
 
 
 async def create_mqtt_client(driver_object, mirror):

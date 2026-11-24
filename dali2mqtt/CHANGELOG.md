@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.20.2
+
+- Validate required lamp replies before changing state or publishing MQTT
+  updates. Preserve previous state when replies are missing or invalid.
+- Continue refreshing healthy lamps and preserve affected groups during
+  partial discovery, without duplicating lamp associations.
+- Report incomplete entity refreshes in the API and persistent UI warnings.
+  Keep successful commissioning separate from subsequent refresh failures.
+
 ## 1.20.1
 
 - Require valid status replies during control-device scans, reject framing

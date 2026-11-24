@@ -45,6 +45,8 @@
   .scene input{width:100%;padding:4px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
   .cmds{display:flex;flex-wrap:wrap;gap:6px}
   .muted{color:var(--muted)}
+  #operationResult{flex-basis:100%;padding:8px 12px;border:1px solid var(--line);border-radius:8px;overflow-wrap:anywhere}
+  #operationResult:empty{display:none}
   #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 16px;border-radius:8px;opacity:0;transition:.25s;pointer-events:none}
   #toast.show{opacity:.95}
   .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--muted);border-top-color:transparent;border-radius:50%;animation:s .7s linear infinite;vertical-align:-2px}
@@ -87,6 +89,7 @@
   <button onclick="commission(false)" title="Assign addresses to new/unaddressed gear">Commission (new)</button>
   <button onclick="toggleAdvanced()" title="Advanced / danger tools" style="opacity:.5">⋯</button>
   <button id="btnReaddr" class="warn" onclick="readdressAll()" style="display:none" title="DANGER: clears and re-indexes ALL addresses">Re-address all…</button>
+<div id="operationResult" role="status" aria-live="polite"></div>
 </header>
 
 <div class="layout">
@@ -111,7 +114,7 @@ async function api(path, opts){
   if(!r.ok){ let e; try{e=(await r.json()).error}catch(_){}; throw new Error(e||("HTTP "+r.status)); }
   return r.json();
 }
-function post(path, body){ return api(path, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body||{})}); }
+function post(path, body){ $("#operationResult").textContent = ""; return api(path, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body||{})}); }
 function toast(msg){ const t=$("#toast"); t.textContent=msg; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),1800); }
 
 async function scan(){
@@ -531,7 +534,7 @@ async function changeAddr(a){
 async function commission(){
   if(!confirm("Commission new gear: assign short addresses to currently UNADDRESSED control gear. Existing addresses are kept. Continue?")) return;
   toast("Commissioning… this can take a while");
-  try{ await post("api/commission",{readdress:false}); toast("Commissioning done. Rescanning…"); await scan(); }
+  try{ const result = await post("api/commission",{readdress:false}); showRefreshResult(result.refresh, "Addressing completed. "); await scan(); }
   catch(e){ toast("Commission failed: "+e.message); }
 }
 function toggleAdvanced(){
@@ -547,10 +550,26 @@ async function readdressAll(){
     "If you are absolutely sure, type  READDRESS  (in capitals) to proceed:");
   if(phrase !== "READDRESS"){ toast("Cancelled — nothing changed"); return; }
   toast("Re-addressing the whole bus… this can take minutes");
-  try{ await post("api/commission",{readdress:true}); toast("Re-address done. Rescanning…"); await scan(); }
+  try{ const result = await post("api/commission",{readdress:true}); showRefreshResult(result.refresh, "Re-addressing completed. "); await scan(); }
   catch(e){ toast("Re-address failed: "+e.message); }
 }
-async function reinit(){ try{ await post("api/reinit"); toast("HA entities refreshed"); }catch(e){toast(e.message);} }
+function showRefreshResult(result, prefix = ""){
+  const area = $("#operationResult");
+  if (!result || !result.ok) {
+    area.textContent = prefix + "Entity refresh failed: " + (result?.error || "bridge unavailable");
+  } else if (result.partial) {
+    const failures = result.failed.map(f => `${f.kind === "group" ? "G" : "A"}${f.address} (${f.query}: ${f.reason})`);
+    area.textContent = prefix + "Entity refresh incomplete: " + failures.join(", ") + ". Previous state preserved; new unreadable entities deferred.";
+  } else {
+    area.textContent = prefix + "HA entities refreshed";
+  }
+  toast(area.textContent);
+}
+async function reinit(){
+  $("#operationResult").textContent = "Refreshing HA entities...";
+  try { showRefreshResult(await post("api/reinit")); }
+  catch(e){ showRefreshResult({ok:false, error:e.message}); }
+}
 
 // ---- DALI-2 push-button instance config (Part 301) ----
 const PB_EVENTS=["button_released","button_pressed","short_press","double_press","long_press_start","long_press_repeat","long_press_stop","button_stuck_free"];

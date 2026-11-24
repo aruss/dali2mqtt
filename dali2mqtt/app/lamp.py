@@ -17,6 +17,36 @@ logger = logging.getLogger(__name__)
 COLOUR_OPERATION_TIMEOUT = 5
 
 
+class LampReadError(ValueError):
+    """A required lamp reply was absent or invalid; transport errors are separate."""
+
+    def __init__(self, address, query, reason):
+        self.address, self.query, self.reason = address, query, reason
+        super().__init__(f"A{address} {query}: {reason}")
+        logger.warning("Rejected lamp reply A%s query=%s reason=%s", address, query, reason)
+
+    def failure(self, kind="lamp", address=None):
+        return {"kind": kind, "address": self.address if address is None else address,
+                "query": self.query, "reason": self.reason}
+
+
+def validate_reply(response, address, query, minimum=0, maximum=254, scene=False, bitmap=False):
+    if response is None or getattr(response, "raw_value", None) is None:
+        raise LampReadError(address, query, "missing")
+    if response.raw_value.error:
+        raise LampReadError(address, query, "framing_error")
+    value = response.value
+    if bitmap:
+        value = getattr(value, "as_integer", value)
+    if value == "MASK" or type(value) is int and value == 255 and scene:
+        if scene:
+            return "MASK"
+        raise LampReadError(address, query, "mask")
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise LampReadError(address, query, "invalid_value")
+    return value
+
+
 class Lamp:
     def __init__(self, driver, mqtt, dali_lamp, busy=None):
         self.config = Config()
@@ -31,40 +61,51 @@ class Lamp:
         self.friendly_name = DevicesNamesConfig().get_friendly_name(f"DALI Lamp {self.address}")
         self.device_name = f"lamp_{self.address}"
 
+        self.groups = []
         self.current_scene = None
         self.colour_config = DaliConfig(driver, busy=busy)
         self.colour_capabilities = {}
         self.colour_capabilities_loaded = False
 
 
-    async def read_current_state(self):
-        _scenes = []
-        for i in range(0, 16):
-            v = (await self.driver.send(gear.QuerySceneLevel(self.dali_lamp, i))).value
-            _scenes.append(v)
-        self.scenes = _scenes
-        logger.debug(f"Scenes: {json.dumps(self.scenes)}")
+    async def _read_required(self, command, **options):
+        response = await self.driver.send(command)
+        return validate_reply(response, self.address, type(command).__name__, **options)
 
-        self.groups = []
-        self.min_physical_level = (await self.driver.send(gear.QueryPhysicalMinimum(self.dali_lamp))).value
-        self.min_level = (await self.driver.send(gear.QueryMinLevel(self.dali_lamp))).value
-        self.min_levels = max(self.min_physical_level, self.min_level)
+    def _normalized_level(self, level, minimum):
+        if level == 0:
+            return 0
+        if minimum == 254:
+            return 255
+        return normalize(max(level, minimum), minimum, 254, 1, 255)
+
+    async def read_current_state(self, required_only=False):
+        # Stage every required reply before changing fields or retained MQTT values.
+        scenes = [await self._read_required(gear.QuerySceneLevel(self.dali_lamp, i), scene=True)
+                  for i in range(16)]
+        physical = await self._read_required(gear.QueryPhysicalMinimum(self.dali_lamp), minimum=1)
+        minimum = await self._read_required(gear.QueryMinLevel(self.dali_lamp), minimum=1)
+        actual = await self._read_required(gear.QueryActualLevel(self.dali_lamp))
+        self.scenes = scenes
+        self.min_physical_level = physical
+        self.min_level = minimum
+        self.min_levels = max(physical, minimum)
         self.max_level = 254
-#        await self.driver.send(gear.DAPC(self.dali_lamp, 254))
-#        await self.driver.send(gear.SetMaxLevel(self.dali_lamp))
-#(await self.driver.send(gear.QueryMaxLevel(self.dali_lamp))).value
+        self.level = self._normalized_level(actual, self.min_levels)
+        if not required_only:
+            await self.publish_current_state()
 
-        await self._getLevelDALI()
+    async def publish_current_state(self, config_owned=False):
         if not self.colour_capabilities_loaded:
             try:
                 self.colour_capabilities = await asyncio.wait_for(
-                    self.colour_config.colour_capabilities(self.address), COLOUR_OPERATION_TIMEOUT
+                    self.colour_config.colour_capabilities(self.address, guarded=not config_owned), COLOUR_OPERATION_TIMEOUT
                 )
                 self.colour_capabilities_loaded = True
             except Exception as err:
                 logger.warning("DT8 capabilities unavailable for A%s: %s: %s", self.address, type(err).__name__, err)
         self._register_discovery()
-        await self.pollColour()
+        await self.pollColour(config_owned=config_owned)
         self.setSceneToNoneMQTT()
 
         self.mqtt.publish(
@@ -258,12 +299,12 @@ class Lamp:
     def colour_topic(self, mode, suffix):
         return f"{self.config[CONF_MQTT_BASE_TOPIC]}/{self.device_name}/{mode}/{suffix}"
 
-    async def pollColour(self):
+    async def pollColour(self, config_owned=False):
         if not (self.colour_capabilities.get("color_temp") or self.colour_capabilities.get("rgb")):
             return
         try:
             state = await asyncio.wait_for(
-                self.colour_config.colour_state(self.address, self.colour_capabilities),
+                self.colour_config.colour_state(self.address, self.colour_capabilities, guarded=not config_owned),
                 COLOUR_OPERATION_TIMEOUT,
             )
         except Exception as err:
@@ -316,13 +357,8 @@ class Lamp:
         logger.info(f"Call scene {scene} on {self.friendly_name}")
 
     async def _getLevelDALI(self):
-        level = (await self.driver.send(gear.QueryActualLevel(self.dali_lamp))).value
-        if level == 0:
-            self.level = 0
-        elif self.min_levels == 254:
-            self.level = 255
-        else:
-            self.level = normalize(max(level, self.min_levels), self.min_levels, 254, 1, 255)
+        level = await self._read_required(gear.QueryActualLevel(self.dali_lamp))
+        self.level = self._normalized_level(level, self.min_levels)
         logger.debug(f"Get {self.friendly_name} brightness level {self.level} ({level})")
 
     async def flash(self, count, speed):

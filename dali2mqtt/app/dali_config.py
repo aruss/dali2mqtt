@@ -353,7 +353,7 @@ class DaliConfig:
             raise ValueError("Unavailable DT8 channel level")
         return high
 
-    async def colour_capabilities(self, addr):
+    async def colour_capabilities(self, addr, guarded=True):
         """Discover DT8 features, including gear supporting multiple types."""
         if _colour is None:
             return {}
@@ -389,10 +389,12 @@ class DaliConfig:
                     logger.warning("DT8 A%s temperature limits unavailable: %s", addr, err)
             return caps
 
+        if not guarded:
+            return await self.driver.run_sequence(sequence())
         async with self._guard("colour_capabilities", address=addr):
             return await self.driver.run_sequence(sequence())
 
-    async def colour_state(self, addr, capabilities):
+    async def colour_state(self, addr, capabilities, guarded=True):
         await self._ready()
         short = address.Short(addr)
 
@@ -409,6 +411,8 @@ class DaliConfig:
                 return {"color_mode": "rgb", "rgb": [round(v * 255 / 254) for v in channels]}
             return {}
 
+        if not guarded:
+            return await self.driver.run_sequence(sequence())
         async with self._guard("colour_state", address=addr):
             return await self.driver.run_sequence(sequence())
 

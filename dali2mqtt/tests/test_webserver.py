@@ -144,3 +144,70 @@ async def test_monitor_endpoint():
         assert "events" in data and "last" in data
     finally:
         await client.close()
+
+# M06 refresh results must distinguish unavailable runtime and partial replies.
+import pytest
+from unittest.mock import AsyncMock
+from app import bridge
+
+
+@pytest.mark.parametrize("result", [
+    {"ok": True, "partial": False, "refreshed": [0, 1], "failed": []},
+    {"ok": True, "partial": True, "refreshed": [1], "failed": [{"kind": "lamp", "address": 0, "query": "QueryActualLevel", "reason": "mask"}]},
+    {"ok": True, "partial": True, "refreshed": [], "failed": [{"kind": "lamp", "address": 0, "query": "QueryActualLevel", "reason": "missing"}]},
+])
+async def test_refresh_result_contract(result):
+    client = await _client(FakeDriver(), reinit=AsyncMock(return_value=result))
+    try:
+        reply = await client.post('/api/reinit')
+        assert reply.status == 200
+        assert await reply.json() == result
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("callback,status", [
+    (None, 503), (AsyncMock(side_effect=bridge.BridgeNotReady("not ready")), 503),
+    (AsyncMock(side_effect=RuntimeError("transport failed")), 500),
+])
+async def test_refresh_json_errors(callback, status):
+    client = await _client(FakeDriver(), reinit=callback)
+    try:
+        reply = await client.post('/api/reinit')
+        assert reply.status == status
+        assert 'error' in await reply.json()
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("refresh", [
+    {"ok": True, "partial": True, "refreshed": [], "failed": []},
+    RuntimeError("transport failed"),
+])
+async def test_commission_success_survives_refresh_failure(refresh):
+    callback = AsyncMock(side_effect=refresh) if isinstance(refresh, Exception) else AsyncMock(return_value=refresh)
+    server = DaliWebServer(FakeDriver(), {}, reinit=callback)
+    server.cfg.commission = AsyncMock(return_value={"ok": True, "addresses": [0]})
+    client = TestClient(TestServer(server._app()))
+    await client.start_server()
+    try:
+        reply = await client.post('/api/commission', json={"readdress": False})
+        assert reply.status == 200
+        data = await reply.json()
+        assert data['ok'] and data['addresses'] == [0]
+        assert data['refresh'] == ({"ok": False, "error": str(refresh)} if isinstance(refresh, Exception) else refresh)
+    finally:
+        await client.close()
+
+async def test_commission_addressing_failure_is_operation_error():
+    server = DaliWebServer(FakeDriver(), {}, reinit=AsyncMock())
+    server.cfg.commission = AsyncMock(side_effect=RuntimeError("addressing failed"))
+    client = TestClient(TestServer(server._app()))
+    await client.start_server()
+    try:
+        reply = await client.post('/api/commission', json={})
+        assert reply.status == 500
+        assert await reply.json() == {"error": "addressing failed"}
+        server.reinit.assert_not_awaited()
+    finally:
+        await client.close()
