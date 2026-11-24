@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.20.1
+
+- Require valid status replies during control-device scans, reject framing
+  errors, and report transport failures without returning partial results.
+- Clear controls for devices missing from a successful scan while retaining
+  saved MQTT profiles and Home Assistant discovery. Failed scans retain
+  previous results and selections.
+
 ## 1.20.0
 
 - Assign a Jung 1745 DSTE MQTT profile from the control-device page. Each
