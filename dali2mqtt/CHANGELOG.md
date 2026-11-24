@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.20.0
+
+- Assign a Jung 1745 DSTE MQTT profile from the control-device page. Each
+  configured knob has an Action entity, ten gesture triggers, and an optional
+  numeric Rotary input sensor for raw instance 3 reports.
+- Restore discovery on reconnect and keep a single DALI event listener across
+  MQTT reconnects. Profile assignment preserves physical device settings.
+
 ## 1.19.1
 
 - Stop delayed DT8 and other query notifications from triggering a continuous

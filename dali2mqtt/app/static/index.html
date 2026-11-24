@@ -209,6 +209,15 @@ function selectDevice(a){
         <button onclick="identifyDevice(${a})">🔦 Identify device</button>
         <button onclick="loadDevice(${a})">Read instances</button>
       </div>
+      <div class="field">
+        <label for="mqttProfile">Home Assistant MQTT profile</label>
+        <select id="mqttProfile">
+          <option value="">None</option>
+          <option value="jung_1745_dste">Jung 1745 DSTE</option>
+          <option value="jung_1745_dste_absolute">Jung 1745 DSTE with rotary input</option>
+        </select>
+        <button onclick="saveProfile(${a}, this)">Save profile</button>
+      </div>
     </div>
     <div class="card">
       <h2>Application Controller and instances</h2>
@@ -228,6 +237,23 @@ function selectDevice(a){
         stored in the device's Lunatone application config and is not exposed by the
         generic DALI-2 protocol; this panel handles addressing, identify and instances.</div>
     </div>`;
+  $("#mqttProfile").value = d.profile || "";
+}
+
+async function saveProfile(addr, button){
+  const select = $("#mqttProfile");
+  button.disabled = select.disabled = true;
+  try {
+    const result = await post(`api/device/${addr}/profile`, {profile: select.value || null});
+    const device = deviceOf(addr);
+    if (device) device.profile = result.profile;
+    toast(`MQTT profile saved for D${addr}`);
+  } catch (error) {
+    select.value = deviceOf(addr)?.profile || "";
+    toast(error.message);
+  } finally {
+    button.disabled = select.disabled = false;
+  }
 }
 
 async function identifyDevice(a){ try{ await post(`api/device/${a}/identify`); toast("Identifying D"+a); }catch(e){toast(e.message);} }

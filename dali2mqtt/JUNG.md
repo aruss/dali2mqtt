@@ -9,7 +9,38 @@ Local software checks passed; physical operation and persistent storage still
 need the acceptance checks below. Installing this change, deploying the bridge,
 and configuring physical devices are separate operations.
 
-## Configure one control at a time
+## Add the knob to Home Assistant
+
+In the add-on, **Scan devices**, select D1 and use **Identify device** to
+confirm the physical knob. Under **Home Assistant MQTT profile**, select
+**Jung 1745 DSTE** and click **Save profile**. This saves the assignment in
+add-on data and publishes discovery. It sends no DALI commands. This works
+with all four instances disabled and preserves direct wall control.
+
+Open **Settings → Devices & services → MQTT → Devices → Jung 1745 DSTE D1**.
+The **Action** entity and ten device triggers use button and rotation reports
+from instances 0 and 2. To produce gestures, use the instance settings below.
+Changing the Application Controller setting is a separate physical change.
+Leave it at its original setting when testing direct wall control. When using
+both HA automations and the controller, take care that one gesture does not
+command the same lamp twice.
+
+For **Rotary input**, choose **Jung 1745 DSTE with rotary input**. Record the
+current instance enable flags and schemes. For an absolute-only trial, disable
+instances 0, 1 and 2, set instance 3 to **Device + instance** (scheme 2), then
+enable it. Reread D1 and wait for the configuration operation to finish before
+turning the knob. The sensor shows the raw ten-bit event information as a
+number, starting at **unknown** until an instance 3 report arrives. Calibration
+on D1 is pending. Actual brightness and colour temperature are on A0/A1.
+
+To return to gestures, disable instance 3, restore the gesture settings for
+instances 0 and 2 below, leave instance 1 disabled, and select the basic Jung
+profile. To restore the original wall configuration after a trial, restore
+the recorded settings. Selecting **None** removes the MQTT entities and
+device triggers for that address. Remove the old assignment before readdressing
+a knob, then identify and assign its new address.
+
+## Configure one control at a time for the gesture blueprint
 
 1. Connect the Tridonic interface and check bridge MQTT connectivity. Open the
    DALI Config UI and scan **control devices**. Gear (lamp) addresses and control

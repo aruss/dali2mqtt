@@ -25,7 +25,7 @@ def _json(data, status=200):
 class DaliWebServer:
     def __init__(self, driver, config, reinit=None, busy=None, simulate=None,
                  simulate_broadcast=None, switchmap_get=None, switchmap_save=None,
-                 ha_entities=None, port=8099):
+                 ha_entities=None, port=8099, profiles=None):
         self.cfg = DaliConfig(driver, busy=busy)
         self.config = config
         self.reinit = reinit  # async callable to refresh MQTT discovery
@@ -35,6 +35,7 @@ class DaliWebServer:
         self.switchmap_save = switchmap_save     # sync callable(list) -> dict
         self.ha_entities = ha_entities           # sync callable() -> list
         self.port = port
+        self.profiles = profiles
         self._runner = None
 
     # --------------------------------------------------------------- routes
@@ -66,6 +67,7 @@ class DaliWebServer:
         app.router.add_post("/api/commission_devices", self.api_commission_devices)
         app.router.add_get("/api/device/{addr}", self.api_device_info)
         app.router.add_post("/api/device/{addr}/identify", self.api_device_identify)
+        app.router.add_post("/api/device/{addr}/profile", self.api_device_profile)
         app.router.add_post("/api/device/{addr}/address", self.api_device_address)
         app.router.add_post("/api/device/{addr}/application_controller", self.api_device_setting)
         app.router.add_post("/api/device/{addr}/instance/{instance}/enabled", self.api_device_setting)
@@ -264,6 +266,9 @@ class DaliWebServer:
     async def api_scan_devices(self, request):
         try:
             devices = await self.cfg.scan_devices()
+            if self.profiles is not None:
+                for device in devices:
+                    device["profile"] = self.profiles.profile(device["address"])
             return _json({"devices": devices, "supported": self.cfg.devices_supported()})
         except Exception as err:  # noqa: BLE001
             logger.exception("device scan failed")
@@ -313,6 +318,19 @@ class DaliWebServer:
             return _json({"error": str(err)}, 400)
         except Exception as err:
             return _json({"error": str(err)}, 502)
+
+    async def api_device_profile(self, request):
+        if self.profiles is None:
+            return _json({"error": "MQTT profiles unavailable"}, 503)
+        try:
+            body = await request.json()
+            if not isinstance(body, dict) or "profile" not in body:
+                raise ValueError("A profile is required")
+            addr = self._addr(request)
+            self.profiles.assign(addr, body["profile"])
+            return _json({"profile": self.profiles.profile(addr)})
+        except (TypeError, ValueError) as err:
+            return _json({"error": str(err)}, 400)
 
     async def api_device_identify(self, request):
         return _json(await self.cfg.identify_device(self._addr(request)))

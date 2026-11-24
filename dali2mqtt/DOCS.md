@@ -21,7 +21,7 @@ For Jung 1745 DSTE input controls, see the [Jung setup guide and HA blueprint](J
 
 1. In Home Assistant go to **Settings → Add-ons → Add-on Store**.
 2. Add `https://github.com/aruss/dali2mqtt` (**⋮ → Repositories**),
-   then install **DALI2MQTT 1.19.1** from **aruss add-ons** (amd64 hosts only).
+   then install **DALI2MQTT 1.20.0** from **aruss add-ons** (amd64 hosts only).
    This creates a separate repository entry; existing upstream installations are
    not automatically replaced or migrated.
 3. Make sure you have an **MQTT broker** (e.g. the *Mosquitto broker* add-on)

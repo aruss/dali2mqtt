@@ -8,6 +8,7 @@ import selectors
 import signal
 import traceback
 from pprint import pformat
+from pathlib import Path
 
 import dali.address as address
 import dali.gear.general as gear
@@ -25,6 +26,7 @@ from .devicesnamesconfig import DevicesNamesConfig
 from .group import Group
 from .ha_mirror import HAEntityMirror
 from .lamp import Lamp
+from .jung import JungProfiles
 from .bus_monitor import get_monitor
 
 logging.basicConfig(format=LOG_FORMAT)
@@ -39,6 +41,12 @@ _runtime = {}
 config_busy = asyncio.Event()
 
 
+def refresh_profiles(client):
+    profiles = _runtime.get("profiles")
+    if profiles is not None:
+        profiles.refresh(client)
+
+
 async def reinit_discovery():
     """Re-scan the DALI bus and refresh Home Assistant MQTT discovery."""
     data_object = _runtime.get("data")
@@ -46,6 +54,7 @@ async def reinit_discovery():
     if data_object is None or client is None:
         logger.warning("Cannot reinit: bridge not connected yet")
         return
+    refresh_profiles(client)
     await initialize_lamps(data_object, client)
 
 
@@ -250,6 +259,8 @@ def publish_bus_event(command, response):
             )
         payload = json.dumps(event_payload)
         client.publish(f"{base}/bus_event", payload)
+        if isinstance(command, _Event) and _runtime.get("profiles") is not None:
+            _runtime["profiles"].handle_event(event_payload)
     except Exception as err:  # noqa: BLE001
         logger.debug("bus_event publish failed: %s", err)
 
@@ -482,6 +493,7 @@ async def on_message_scene_cmd(mqtt_client, data_object, msg):
 async def on_message_reinitialize_lamps_cmd(mqtt_client, data_object, msg):
     """Callback on MQTT scan lamps command message."""
     logger.info("Reinitializing lamps")
+    refresh_profiles(mqtt_client)
     config = Config()
     mqtt_client.publish(
         MQTT_DALI2MQTT_STATUS.format(config[CONF_MQTT_BASE_TOPIC]),
@@ -497,6 +509,7 @@ async def on_message_ha_online(mqtt_client, data_object, msg):
     if str(payload).lower() != "online":
         return
     logger.info("Home Assistant came online; republishing lamps")
+    refresh_profiles(mqtt_client)
     await initialize_lamps(data_object, mqtt_client)
 
 
@@ -539,17 +552,26 @@ async def on_connect(client, data_object, flags, result):  # pylint: disable=W06
         retain=True,
     )
     # Queue processes state updates triggered by physical DALI bus traffic.
-    data_object["queue"] = asyncio.Queue()
+    if "queue" not in data_object:
+        data_object["queue"] = asyncio.Queue()
 
     _runtime["data"] = data_object
     _runtime["client"] = client
-    await start_listening_on_dali(data_object)
+    refresh_profiles(client)
+    if "dali_listener" not in data_object:
+        data_object["dali_listener"] = asyncio.create_task(start_listening_on_dali(data_object))
+    try:
+        await data_object["dali_listener"]
+    except Exception:
+        data_object.pop("dali_listener", None)
+        raise
     from .dali_config import DaliConfig
 
     await DaliConfig(data_object["driver"], busy=config_busy).refresh_instance_map()
     await initialize_lamps(data_object, client)
     await register_bridge(client)
-    await asyncio.create_task(process_queue(client, data_object))
+    if "queue_worker" not in data_object or data_object["queue_worker"].done():
+        data_object["queue_worker"] = asyncio.create_task(process_queue(client, data_object))
 
 
 async def register_bridge(client):
@@ -764,7 +786,10 @@ async def start_listening_on_dali(data_object):
     """Start listening on the DALI bus."""
     dev = data_object["driver"]
     get_monitor(dev, busy=config_busy)
-    dev.bus_traffic.register(functools.partial(print_command_and_response, data_object))
+    if "traffic_subscription" not in data_object:
+        data_object["traffic_subscription"] = dev.bus_traffic.register(
+            functools.partial(print_command_and_response, data_object)
+        )
     dev.connect()
     logger.debug("Waiting for device...")
     await dev.connected.wait()
@@ -833,6 +858,9 @@ def main(args):
 
     devices_names_config = DevicesNamesConfig()
     devices_names_config.setup()
+    profiles = JungProfiles(Path(config[CONF_DEVICES_NAMES_FILE]).parent,
+                           config[CONF_MQTT_BASE_TOPIC], config[CONF_HA_DISCOVERY_PREFIX])
+    _runtime["profiles"] = profiles
 
     mirror = HAEntityMirror(config.switch_map, *config.ha_conf)
     if config.switch_map and not mirror.enabled:
@@ -868,7 +896,7 @@ def main(args):
             dali_driver, config, reinit=reinit_discovery, busy=config_busy,
             simulate=simulate_button, simulate_broadcast=simulate_broadcast,
             switchmap_get=get_switch_map, switchmap_save=save_switch_map,
-            ha_entities=list_ha_entities, port=8099,
+            ha_entities=list_ha_entities, port=8099, profiles=profiles,
         )
         asyncio.ensure_future(web.start())
     except Exception as err:  # noqa: BLE001
